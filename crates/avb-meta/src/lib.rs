@@ -47,10 +47,8 @@
 //!
 //! The OEM root key is embedded in the ABL image, and the ABL byte-compares the
 //! root `vbmeta`'s public key against it: the stock `AvbValidateVbmetaPublicKey`
-//! trusts only the **first** embedded key (the `fw-image` scanner of the shared
-//! maos crates records the same rule:
-//! `next-gen/maos/shared/fw-image/src/lib.rs:201`). [`abl_keys`] recovers every
-//! such key from an image by
+//! trusts only the **first** embedded key. [`abl_keys`] recovers every such key
+//! from an image by
 //! structure alone, in file order, and [`AblKeys::anchor`] is the first one.
 //! [`Plan::anchored`] accepts the root only when its embedded key is that
 //! anchor; a root signed by a *later* embedded key is reported

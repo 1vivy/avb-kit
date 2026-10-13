@@ -15,7 +15,7 @@ std = []
 # `androidboot.vbmeta.digest` and the authentication hash. Without it the crate
 # parses headers, typed descriptors and footers with no dependency at all.
 digest = ["dep:sha2"]
-# `verify` pulls in `num-bigint` for RSA PKCS#1 v1.5 verification, and with it
+# `verify` uses in-crate fixed-width RSA PKCS#1 v1.5 verification and enables
 # the whole walk (`Plan`): it exists only to judge an image against a key, so it
 # cannot exist without verification. Substitution policy (when to serve a stored
 # image instead of an on-slot one) is a consumer's job, not this crate's:
@@ -23,7 +23,7 @@ digest = ["dep:sha2"]
 # deliberately **not** gated: its `rr == 2^(2*bits)
 # mod n` self-consistency check is computed in-crate, so the key scan stays
 # dependency-free.
-verify = ["digest", "dep:num-bigint"]
+verify = ["digest"]
 # `api` adds the flat, owned projection of this crate for binding generators
 # (`avb_meta::api`): plain structs, no lifetimes, no serde, no new dependencies.
 # It needs `verify`, because the walk it projects cannot exist without signature
@@ -32,8 +32,10 @@ api = ["verify"]
 
 [dependencies]
 avb-graft = { path = "../avb-graft" }
-num-bigint = { version = "0.4.6", default-features = false, optional = true }
 sha2 = { version = "0.10.9", default-features = false, optional = true }
+
+[dev-dependencies]
+num-bigint = { version = "0.4.6", default-features = false }
 
 [[test]]
 name = "plan"

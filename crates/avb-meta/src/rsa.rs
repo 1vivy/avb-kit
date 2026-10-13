@@ -11,11 +11,9 @@
 //! the public exponent 65537 modulo the modulus, and the result is compared with
 //! the PKCS#1 v1.5 encoding `00 01 FF…FF 00 T H` where `T` is the 19-byte
 //! DigestInfo prefix for the hash (`avb_crypto.c`'s padding constants are that
-//! same byte string). libavb uses a Montgomery ladder over the key's `n0inv`/`rr`
-//! precomputation; this crate uses plain modular exponentiation and therefore
-//! needs only the modulus, which is exactly why [`abl_keys`] additionally checks
-//! `n0inv` and `rr` for self-consistency — a blob that is not a real AVB key must
-//! not be reported as one.
+//! same byte string). Verification uses fixed-width Montgomery multiplication
+//! over the public key's `n0inv`/`rr` precomputation. There are no private inputs
+//! or general-purpose big integers; the only exponent is 65537.
 //!
 //! The observed canoe ABL byte-compares the root vbmeta's public key against its
 //! compiled-in `OEMPublicKey`; on the exact PE
@@ -29,14 +27,9 @@ use crate::HashAlg;
 use crate::sha256;
 use alloc::vec;
 use alloc::vec::Vec;
-#[cfg(feature = "verify")]
-use num_bigint::BigUint;
 
 /// Size of `AvbRSAPublicKeyHeader`.
 pub const RSA_KEY_HEADER_SIZE: usize = 8;
-/// The public exponent AVB uses.
-#[cfg(feature = "verify")]
-const PUBLIC_EXPONENT: u32 = 65537;
 /// PKCS#1 v1.5 DigestInfo prefix for SHA-256 (19 bytes).
 #[cfg(feature = "verify")]
 const SHA256_DIGEST_INFO: [u8; 19] = [
@@ -76,10 +69,8 @@ impl AblKey {
 /// order, and the trust anchor derived from them.
 ///
 /// The stock ABL's `AvbValidateVbmetaPublicKey` byte-compares the root vbmeta's
-/// public key against the **first** key embedded in its own image (`fw-image`'s
-/// scanner in the shared maos crates records the same rule and dedups
-/// equal blobs, `next-gen/maos/shared/fw-image/src/lib.rs:201`). [`AblKeys::anchor`]
-/// is therefore the first key in file order,
+/// public key against the **first** key embedded in its own image.
+/// [`AblKeys::anchor`] is therefore the first key in file order,
 /// and a later key is reported (`[AblKeys::keys]`, with offsets) but is not an
 /// anchor unless a caller passes it as `extra_trusted`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -150,8 +141,8 @@ impl AblKeys {
 /// key evidence rather than a pattern match; see the crate docs for the
 /// limitation that structural consistency is not proof the ABL uses the blob.
 ///
-/// Every occurrence is reported with its offset: unlike gobbl's
-/// `scan_avb_keys`, which dedups equal blobs, this keeps each offset visible.
+/// Every occurrence is reported with its offset. Consumers needing distinct
+/// blobs deduplicate in file order, preserving the same first anchor.
 pub fn abl_keys(image: &[u8]) -> AblKeys {
     AblKeys::scan(image)
 }
@@ -175,28 +166,10 @@ fn modulus(blob: &[u8], bits: u32) -> Option<&[u8]> {
     blob.get(RSA_KEY_HEADER_SIZE..RSA_KEY_HEADER_SIZE + len)
 }
 
-/// The PKCS#1 v1.5 encoding of `digest` under a `key_bytes`-byte modulus.
-#[cfg(feature = "verify")]
-fn pkcs1_message(key_bytes: usize, digest: &[u8], algorithm: HashAlg) -> Option<Vec<u8>> {
-    let info = match algorithm {
-        HashAlg::Sha256 => SHA256_DIGEST_INFO.as_slice(),
-        HashAlg::Sha512 => SHA512_DIGEST_INFO.as_slice(),
-    };
-    let padding = key_bytes.checked_sub(3 + info.len() + digest.len())?;
-    let mut out = Vec::with_capacity(key_bytes);
-    out.push(0x00);
-    out.push(0x01);
-    out.resize(2 + padding, 0xff);
-    out.push(0x00);
-    out.extend_from_slice(info);
-    out.extend_from_slice(digest);
-    Some(out)
-}
-
 /// Verify a PKCS#1 v1.5 RSA signature over `digest` with `blob` as the key.
 ///
 /// Returns `false` for every malformed input; it never panics. Available with
-/// the `verify` feature, which is what `num-bigint` is gated on.
+/// the `verify` feature. All arithmetic is bounded by the supported key widths.
 #[cfg(feature = "verify")]
 pub fn rsa_pkcs1_verify(blob: &[u8], signature: &[u8], digest: &[u8], algorithm: HashAlg) -> bool {
     let Some(bits) = key_num_bits(blob) else {
@@ -209,26 +182,107 @@ pub fn rsa_pkcs1_verify(blob: &[u8], signature: &[u8], digest: &[u8], algorithm:
     if signature.len() != key_bytes || digest.len() != algorithm.len() {
         return false;
     }
-    let Some(expected) = pkcs1_message(key_bytes, digest, algorithm) else {
+    if modulus[0] & 0x80 == 0 || modulus[key_bytes - 1] & 1 == 0 {
         return false;
+    }
+    let words = key_bytes / 4;
+    let mut n = [0u32; 256];
+    let mut rr = [0u32; 256];
+    let mut base = [0u32; 256];
+    let mut value = [0u32; 256];
+    let mut scratch = [0u32; 256];
+    let n = &mut n[..words];
+    let rr = &mut rr[..words];
+    let base = &mut base[..words];
+    let value = &mut value[..words];
+    let scratch = &mut scratch[..words];
+    decode_words(modulus, n);
+    decode_words(&blob[8 + key_bytes..], rr);
+    decode_words(signature, base);
+    let inverse = u32::from_be_bytes(blob[4..8].try_into().unwrap());
+    if n[0].wrapping_mul(inverse) != u32::MAX {
+        return false;
+    }
+    // Full-width n means any input of this width is below 2*n.
+    reduce(base, n);
+    montgomery(value, base, rr, n, inverse);
+    for _ in 0..8 {
+        montgomery(scratch, value, value, n, inverse);
+        montgomery(value, scratch, scratch, n, inverse);
+    }
+    // Multiply by the original, non-Montgomery signature to both add the
+    // low exponent bit and leave the Montgomery domain.
+    montgomery(scratch, value, base, n, inverse);
+    let info = match algorithm {
+        HashAlg::Sha256 => &SHA256_DIGEST_INFO,
+        HashAlg::Sha512 => &SHA512_DIGEST_INFO,
     };
-    let n = BigUint::from_bytes_be(modulus);
-    if n.bits() == 0 {
-        return false;
-    }
-    let recovered = BigUint::from_bytes_be(signature).modpow(&BigUint::from(PUBLIC_EXPONENT), &n);
-    let raw = recovered.to_bytes_be();
-    if raw.len() > key_bytes {
-        return false;
-    }
-    // Left-pad to the modulus width, then compare in constant time.
-    let mut padded = vec![0u8; key_bytes - raw.len()];
-    padded.extend_from_slice(&raw);
+    let info_at = key_bytes - digest.len() - info.len();
+    let digest_at = key_bytes - digest.len();
     let mut difference = 0u8;
-    for (a, b) in padded.iter().zip(expected.iter()) {
-        difference |= a ^ b;
+    for at in 0..key_bytes {
+        let actual = (scratch[words - 1 - at / 4] >> (24 - 8 * (at % 4))) as u8;
+        let expected = match at {
+            0 => 0,
+            1 => 1,
+            _ if at < info_at - 1 => 0xff,
+            _ if at == info_at - 1 => 0,
+            _ if at < digest_at => info[at - info_at],
+            _ => digest[at - digest_at],
+        };
+        difference |= actual ^ expected;
     }
     difference == 0
+}
+
+#[cfg(feature = "verify")]
+fn decode_words(bytes: &[u8], words: &mut [u32]) {
+    for (word, bytes) in words.iter_mut().rev().zip(bytes.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
+    }
+}
+
+#[cfg(feature = "verify")]
+fn subtract(value: &mut [u32], modulus: &[u32]) {
+    let mut borrow = 0u64;
+    for (word, &n) in value.iter_mut().zip(modulus) {
+        let sub = u64::from(n) + borrow;
+        let original = u64::from(*word);
+        *word = original.wrapping_sub(sub) as u32;
+        borrow = u64::from(original < sub);
+    }
+}
+
+#[cfg(feature = "verify")]
+fn reduce(value: &mut [u32], modulus: &[u32]) {
+    if value.iter().rev().cmp(modulus.iter().rev()).is_ge() {
+        subtract(value, modulus);
+    }
+}
+
+/// Coarsely integrated operand scanning, radix 2^32. Each inner sum fits
+/// u64: a 32x32 product plus one word and one carry. The cancelling low word
+/// is discarded each round, implementing division by the Montgomery radix.
+#[cfg(feature = "verify")]
+fn montgomery(out: &mut [u32], a: &[u32], b: &[u32], n: &[u32], inverse: u32) {
+    out.fill(0);
+    for &word in a {
+        let mut product = u64::from(word) * u64::from(b[0]) + u64::from(out[0]);
+        let factor = (product as u32).wrapping_mul(inverse);
+        let mut reduction = u64::from(factor) * u64::from(n[0]) + u64::from(product as u32);
+        for j in 1..n.len() {
+            product = (product >> 32) + u64::from(word) * u64::from(b[j]) + u64::from(out[j]);
+            reduction =
+                (reduction >> 32) + u64::from(factor) * u64::from(n[j]) + u64::from(product as u32);
+            out[j - 1] = reduction as u32;
+        }
+        let carry = (product >> 32) + (reduction >> 32);
+        out[n.len() - 1] = carry as u32;
+        if carry >> 32 != 0 {
+            subtract(out, n);
+        }
+    }
+    reduce(out, n);
 }
 
 /// `-1 / n[0] mod 2^32`, where `n[0]` is the least significant 32-bit word.
@@ -366,6 +420,48 @@ fn scan_abl_keys(image: &[u8]) -> Vec<AblKey> {
 #[cfg(all(test, feature = "verify"))]
 mod tests {
     use super::*;
+    use num_bigint::BigUint;
+
+    /// All supported widths, including carries, zero, n-1, and inputs >= n.
+    /// Production has no big-integer dependency; this is its arithmetic oracle.
+    #[test]
+    fn montgomery_exponent_matches_bigint() {
+        for width in [256, 512, 1024] {
+            for modulus in [alternating_modulus(width), vec![0xff; width]] {
+                let n = BigUint::from_bytes_be(&modulus);
+                let rr = pow2_mod(width * 16, &modulus).unwrap();
+                let inverse = n0inv_of(&modulus).unwrap();
+                let mut nw = vec![0; width / 4];
+                let mut rw = nw.clone();
+                decode_words(&modulus, &mut nw);
+                decode_words(&rr, &mut rw);
+                let mut below = modulus.clone();
+                below[width - 1] -= 1;
+                for bytes in [vec![0; width], below, vec![0xff; width], vec![0x53; width]] {
+                    let mut base = nw.clone();
+                    decode_words(&bytes, &mut base);
+                    reduce(&mut base, &nw);
+                    let mut value = nw.clone();
+                    let mut scratch = nw.clone();
+                    montgomery(&mut value, &base, &rw, &nw, inverse);
+                    for _ in 0..8 {
+                        montgomery(&mut scratch, &value, &value, &nw, inverse);
+                        montgomery(&mut value, &scratch, &scratch, &nw, inverse);
+                    }
+                    montgomery(&mut scratch, &value, &base, &nw, inverse);
+                    let actual: Vec<u8> = scratch
+                        .iter()
+                        .rev()
+                        .flat_map(|word| word.to_be_bytes())
+                        .collect();
+                    assert_eq!(
+                        BigUint::from_bytes_be(&actual),
+                        BigUint::from_bytes_be(&bytes).modpow(&BigUint::from(65537u32), &n)
+                    );
+                }
+            }
+        }
+    }
 
     /// The in-crate modular doubling is the replacement for the big-integer
     /// implementation this module used to call, so it is cross-checked against
