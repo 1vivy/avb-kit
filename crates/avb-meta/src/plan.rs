@@ -673,12 +673,12 @@ impl Plan {
     /// Both gobbl definitions agree on that input: `AVFVerificationData::
     /// public_key_digest::<Sha512>(None)` hashes `header_verified().public_key()`
     /// of every loaded vbmeta image, the root included
-    /// (`gobbl-aosp/bootable/libbootloader/gbl/libgbl/src/android_boot/avf.rs:100-113`),
+    /// (`toolchains/aosp-uefi-gbl-mainline/bootable/libbootloader/gbl/libgbl/src/android_boot/avf.rs:100-113`),
     /// and the profile minter hashes `images[i].key` in the same visit order
-    /// (`next-gen/gobbl/vendor/maos/shared/profile/src/mint.rs:106-110`, whose
+    /// (`legacy/gobbl/vendor/maos/shared/profile/src/mint.rs:106-110`, whose
     /// `Avb::parse` reads exactly `public_key_size` bytes at `public_key_offset`
     /// of the auxiliary block,
-    /// `next-gen/gobbl/vendor/maos/shared/profile/src/avb.rs:83`). Neither
+    /// `legacy/gobbl/vendor/maos/shared/profile/src/avb.rs:83`). Neither
     /// dedups equal keys, and no layout-crate scan is involved.
     ///
     /// `Some` only when every discovered image is supplied and verified — the
