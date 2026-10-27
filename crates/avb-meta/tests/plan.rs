@@ -30,8 +30,17 @@ const EVIDENCE_TOTAL: u64 = 19776;
 /// AOSP libbootloader's SHA-512-signed (`SHA512_RSA4096`) GBL testdata and the
 /// digest AOSP itself recorded for the root (`.../vbmeta_v4_v4_init_boot_a.img`
 /// and `.../vbmeta_v4_v4_init_boot_a.digest.txt`). Apache-2.0 test data, read in
-/// place and never copied into this repository.
-const AOSP_SHA512_DIR: &str = "/home/vivy/Projects/efisp-projects/gobbl-aosp/bootable/libbootloader/gbl/libgbl/testdata/android";
+/// place and never copied into this repository. `AOSP_GBL_WORKSPACE` names the
+/// pinned AOSP GBL store; the default is the shared `toolchains/` one.
+fn aosp_sha512_dir() -> String {
+    let store = std::env::var("AOSP_GBL_WORKSPACE").unwrap_or_else(|_| {
+        // This test runs from the maOS checkout, which sits two directories below the
+        // workspace root that holds `toolchains/`.
+        let here = env!("CARGO_MANIFEST_DIR");
+        format!("{here}/../../../toolchains/aosp-uefi-gbl-mainline")
+    });
+    format!("{store}/bootable/libbootloader/gbl/libgbl/testdata/android")
+}
 
 fn read(path: &str) -> Option<Vec<u8>> {
     let path = Path::new(path);
@@ -987,18 +996,18 @@ fn real_capture_reader_path_reproduces_the_recorded_digest() {
 /// the cmdline while the ABL/TEE VBH over the same bytes stays SHA-256.
 #[test]
 fn sha512_root_matches_the_digest_aosp_recorded() {
-    let Some(image) = read(&format!("{AOSP_SHA512_DIR}/vbmeta_v4_v4_init_boot_a.img")) else {
+    let dir = aosp_sha512_dir();
+    let Some(image) = read(&format!("{dir}/vbmeta_v4_v4_init_boot_a.img")) else {
         return;
     };
-    let recorded = match std::fs::read_to_string(format!(
-        "{AOSP_SHA512_DIR}/vbmeta_v4_v4_init_boot_a.digest.txt"
-    )) {
-        Ok(text) => text.trim().to_owned(),
-        Err(error) => {
-            eprintln!("SKIP: no recorded digest beside the fixture: {error}");
-            return;
-        }
-    };
+    let recorded =
+        match std::fs::read_to_string(format!("{dir}/vbmeta_v4_v4_init_boot_a.digest.txt")) {
+            Ok(text) => text.trim().to_owned(),
+            Err(error) => {
+                eprintln!("SKIP: no recorded digest beside the fixture: {error}");
+                return;
+            }
+        };
     assert_eq!(recorded.len(), 128, "the recorded digest is a SHA-512 one");
 
     let info = inspect(&image).expect("the AOSP fixture is structurally valid");
