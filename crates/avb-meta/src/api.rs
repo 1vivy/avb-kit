@@ -128,11 +128,11 @@ pub struct NeedsReport {
     pub digest_hex: Option<String>,
     /// `androidboot.vbmeta.size`, once `complete`.
     pub size: Option<u64>,
-    /// The same ordered extents hashed with SHA-512, once `complete` — gobbl's
-    /// `vbmeta_sha512` (`profile/src/mint.rs:106-108`).
+    /// The same ordered extents hashed with SHA-512, once `complete`. This is the
+    /// profile `vbmeta_sha512`.
     pub sha512_hex: Option<String>,
     /// The AVF DICE authority: SHA-512 over every supplied image's embedded
-    /// public key in visit order, once `complete` — gobbl's `authority_sha512`.
+    /// public key in visit order, once `complete`. This is the profile `authority_sha512`.
     /// `None` until every image is supplied and verified.
     pub authority_sha512_hex: Option<String>,
     /// `androidboot.vbmeta.hash_alg` (`"sha256"`/`"sha512"`) as libavb would
@@ -289,10 +289,10 @@ fn build_report(plan: &Plan, root_verdict: String) -> NeedsReport {
         .collect();
     let properties = plan.properties();
     let complete = plan.complete();
-    // The ABL/TEE VBH is SHA-256 always; the SHA-512 variant over the same
-    // ordered extents is gobbl's `vbmeta_sha512`, and the libavb cmdline pair
-    // comes from the root's algorithm (nothing at all when it disables
-    // verification). All three describe a *complete* set, so none is reported
+    // The ABL/TEE VBH is always SHA-256. The SHA-512 variant over the same
+    // ordered extents is the profile `vbmeta_sha512`. The libavb cmdline pair
+    // uses the root's algorithm, and is absent when the root disables
+    // verification. All three describe a complete set, so none is reported
     // from a partial one: a partial hash under a "the digest" name would be
     // worse than no value.
     let digest = complete.then(|| plan.vbmeta_digest());
@@ -463,7 +463,7 @@ mod tests {
         let sha512 = report.sha512_hex.as_deref().expect("a complete set");
         assert_eq!(sha512.len(), 128);
         assert_ne!(sha512, EVIDENCE_VBH);
-        // gobbl's DICE authority: SHA-512 over the six embedded public keys.
+        // The DICE authority: SHA-512 over the six embedded public keys.
         let authority = report
             .authority_sha512_hex
             .as_deref()

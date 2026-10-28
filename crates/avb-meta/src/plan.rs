@@ -614,9 +614,8 @@ impl Plan {
     ///
     /// This is the `SET_VBH` value: the observed Qualcomm ABL's
     /// `ComputeVbMetaDigest` is SHA-256 over the ordered extents whatever the
-    /// metadata is signed with, and gobbl's libbootloader patch 0011 records the
-    /// same split for KeyMint (SHA-256) versus libavb's cmdline (the root's
-    /// algorithm). [`Plan::libavb_cmdline_digest`] is the other one.
+    /// metadata is signed with. KeyMint uses SHA-256, and libavb's cmdline uses
+    /// the root's algorithm. [`Plan::libavb_cmdline_digest`] is the other one.
     pub fn vbmeta_digest(&self) -> VbmetaDigest {
         self.vbmeta_digest_with(HashAlg::Sha256)
     }
@@ -670,21 +669,17 @@ impl Plan {
     /// The AVF **DICE authority** hash: SHA-512 over the embedded public key of
     /// every supplied image, concatenated in visit order with repeats kept.
     ///
-    /// Both gobbl definitions agree on that input: `AVFVerificationData::
-    /// public_key_digest::<Sha512>(None)` hashes `header_verified().public_key()`
-    /// of every loaded vbmeta image, the root included
-    /// (`toolchains/aosp-uefi-gbl-mainline/bootable/libbootloader/gbl/libgbl/src/android_boot/avf.rs:100-113`),
-    /// and the profile minter hashes `images[i].key` in the same visit order
-    /// (`legacy/gobbl/vendor/maos/shared/profile/src/mint.rs:106-110`, whose
-    /// `Avb::parse` reads exactly `public_key_size` bytes at `public_key_offset`
-    /// of the auxiliary block,
-    /// `legacy/gobbl/vendor/maos/shared/profile/src/avb.rs:83`). Neither
-    /// dedups equal keys, and no layout-crate scan is involved.
+    /// GBL and the profile minter agree on that input. GBL's
+    /// `AVFVerificationData::public_key_digest::<Sha512>(None)` hashes
+    /// `header_verified().public_key()` of every loaded vbmeta image, the root
+    /// included (`libgbl/src/android_boot/avf.rs` at `c6716cc`). The profile
+    /// minter (`shared/profile`) hashes the key of each image in the same visit
+    /// order, as exactly `public_key_size` bytes at `public_key_offset` of the
+    /// auxiliary block. Neither deduplicates equal keys, and no layout-crate
+    /// scan is involved.
     ///
-    /// `Some` only when every discovered image is supplied and verified — the
-    /// state both gobbl paths hash in (`header_verified()?` fails the whole
-    /// digest otherwise, and the minter only reaches it after
-    /// `MintVerifier::verify` succeeded); `None` otherwise, so a caller can never
+    /// `Some` only when every discovered image is supplied and verified, the
+    /// state that both paths hash in. `None` otherwise, so a caller can never
     /// mistake a partial hash for the authority value.
     #[cfg(feature = "digest")]
     pub fn authority_sha512(&self) -> Option<[u8; 64]> {

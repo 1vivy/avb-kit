@@ -463,10 +463,9 @@ mod tests {
         }
     }
 
-    /// The in-crate modular doubling is the replacement for the big-integer
-    /// implementation this module used to call, so it is cross-checked against
-    /// `num-bigint` on moduli of both supported key widths and on edge shapes
-    /// (all-ones, top bit set, small values near powers of two).
+    /// The in-crate modular doubling is cross-checked against `num-bigint` on
+    /// moduli of both supported key widths and on edge shapes (all-ones, top
+    /// bit set, small values near powers of two).
     #[test]
     fn pow2_mod_matches_num_bigint() {
         let cases: [(u32, Vec<u8>); 5] = [
