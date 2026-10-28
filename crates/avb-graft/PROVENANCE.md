@@ -2,8 +2,9 @@
 
 `shared/avb-graft/src/lib.rs` in maos is the canonical allocation-free
 layout implementation, imported with history from gobbl at `96b4b91`.
-Gobbl consumes it through `vendor/maos`; GBL embeds the same source through
-gobbl's libbootloader patch series. Adapters own I/O and cryptographic admission.
+The maOS EFI uses it through `@maos_avb_graft` (`efi/MODULE.bazel`), and
+`platform/avb-graft-cli` wraps it with host and Android I/O. Adapters own I/O
+and cryptographic admission.
 
 The wire format is grounded in AOSP `external/avb/libavb`:
 
@@ -28,17 +29,5 @@ Current source SHA-256:
 `7efab28ac81752f6f46e523d2daaee39c307b5e01bfa1cedfb0e219f307d049b`.
 Contract tests SHA-256:
 `f23d12b57d901535da305f4b510773cded33d25729f49eb8cf1b2ed2df42ec3d`.
-These content hashes, rather than a pre-cutover commit hash, identify the source.
-
-From the maos worktree, compare the canonical source with materialized GBL:
-
-```sh
-: "${GOBBL_AOSP_WORKSPACE:?set GOBBL_AOSP_WORKSPACE}"
-sha256sum shared/avb-graft/src/lib.rs shared/avb-graft/tests/layout.rs
-cmp shared/avb-graft/src/lib.rs "$GOBBL_AOSP_WORKSPACE/bootable/libbootloader/gbl/avb-graft/src/lib.rs"
-```
-
-After applying the GBL patch series, compare its embedded module directly with
-this canonical `src/lib.rs`, not a separately maintained parser. Formatting the
-canonical source requires refreshing copies and these hashes together. Only
-Cargo manifests may differ for workspace integration.
+These content hashes identify the source. A change of the source or of the
+contract tests needs new hashes in this record.
