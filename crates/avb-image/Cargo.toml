@@ -1,0 +1,10 @@
+[package]
+name = "avb-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AVB placement and graft-image primitives: where metadata goes, and the full image it makes"
+
+[dependencies]
+avb-graft = { path = "../../vendor/avb-graft" }
