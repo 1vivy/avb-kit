@@ -12,7 +12,7 @@ Verification is fixed-width in-crate Montgomery RSA (2048/4096/8192 bits);
 num-bigint is a dev-only arithmetic oracle, never a firmware dependency.
 Profile minting uses `Plan` for chain ordering, key matching and signature
 verification, retaining mint's stricter descriptor policy and external payload
-verification. `dev/abl-key` uses `AblKeys`.
+verification. `soc/qcom/abl-key` uses `AblKeys`.
 
 Refresh by copying that crate from an explicitly reviewed avb-kit revision and
 updating this record; retain the upstream no-I/O, no-unsafe layering contract.
