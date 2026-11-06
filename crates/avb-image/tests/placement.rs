@@ -8,8 +8,8 @@
 //! `avb-graft apply` recipe.
 
 use avb_image::{
-    BLOCK_SIZE, Error, Evidence, Extent, FOOTER_SIZE, PayloadHeader, Placement, ReadError,
-    apply, materialize, parse_footer, plan,
+    BLOCK_SIZE, Error, Evidence, Extent, FOOTER_SIZE, PayloadHeader, Placement, ReadError, apply,
+    materialize, parse_footer, plan,
 };
 use std::path::Path;
 
@@ -211,7 +211,7 @@ fn tail_refuses_occupied_padding_and_a_reaching_payload() {
 
     // A payload extent reaching into the placement is refused as well.
     let payload_size = 99600usize;
-    assert!(payload_size % 4096 != 0);
+    assert!(!payload_size.is_multiple_of(4096));
     let image_size = payload_size + 64 + meta.len();
     let long = stock(image_size, payload_size, payload_size, &meta);
     assert!(matches!(
@@ -357,7 +357,10 @@ fn tail_with_dtbo_evidence_and_zero_tail() {
     );
     let mut clean = unknown.clone();
     clean[28672..].fill(0);
-    assert!(placed.is_err(), "the payload region is untouched by the rule");
+    assert!(
+        placed.is_err(),
+        "the payload region is untouched by the rule"
+    );
     let placed = plan(
         Placement::Tail,
         Extent::ZeroTail,
@@ -500,7 +503,11 @@ fn materialize_reproduces_the_apply_recipe() {
     assert_eq!(grafted[..4096], original[..4096]);
 
     // extract(grafted) == replacement: the footer locates exactly the metadata.
-    let footer = parse_footer(&grafted[grafted.len() - FOOTER_SIZE..], grafted.len() as u64).unwrap();
+    let footer = parse_footer(
+        &grafted[grafted.len() - FOOTER_SIZE..],
+        grafted.len() as u64,
+    )
+    .unwrap();
     let at = footer.vbmeta_offset as usize;
     assert_eq!(
         &grafted[at..at + footer.vbmeta_size as usize],
@@ -621,8 +628,8 @@ fn real_capture_stock_placement() {
     };
     let size = boot.len() as u64;
     let stock = parse_footer(&boot[boot.len() - FOOTER_SIZE..], size).unwrap();
-    let meta = boot[stock.vbmeta_offset as usize
-        ..(stock.vbmeta_offset + stock.vbmeta_size) as usize]
+    let meta = boot
+        [stock.vbmeta_offset as usize..(stock.vbmeta_offset + stock.vbmeta_size) as usize]
         .to_vec();
     assert_eq!(meta.len(), 2368);
 

@@ -5,5 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+avb-format = { path = "../../crates/avb-format" }
+
 [lints]
 workspace = true

@@ -1,14 +1,22 @@
-//! The plan: walking a root `vbmeta` into the set of images the ABL will load,
-//! verifying each supplied image, and producing the metadata digest.
+//! Walking a root `vbmeta` into the set of images it chains, verifying each
+//! supplied image, and producing libavb's metadata digests.
 //!
-//! See the crate documentation for the libavb behaviour this mirrors, for the two
-//! stated deviations, and for the limits of the identity check.
+//! The traversal mirrors `avb_slot_verify.c`: the root image is appended to the
+//! ordered set, then its descriptors are walked in order, appending each chained
+//! image before that image's own descriptors are examined. Chain descriptors are
+//! permitted only in the main image, so the walk is one level deep; a chain
+//! descriptor inside a chained image is invalid metadata.
+//!
+//! Two libavb facts are kept explicit rather than folded into a convenience
+//! value: `androidboot.vbmeta.digest` uses the root's algorithm
+//! ([`Plan::libavb_cmdline_digest`]), while any other ordered digest is whatever
+//! hash the caller asks for ([`Plan::vbmeta_digest_with`]). This crate does not
+//! claim a fixed SHA-256 value is a stock Qualcomm VBH.
 
-use crate::meta::{self, HEADER_SIZE, MAX_VBMETA_IMAGES, VBMETA_MAX_SIZE, VbmetaInfo};
-use crate::rsa::{self, AblKey, AblKeys};
+use crate::meta::{self, VbmetaInfo};
 use crate::{
-    Accepted, Defect, HashAlg, Hasher, Header, Image, Kind, Need, Properties, Rejected, Verdict,
-    hex, sha256,
+    Accepted, Defect, HEADER_SIZE, HashAlg, Image, KeyBlob, Kind, MAX_VBMETA_IMAGES, Need,
+    Property, Rejected, VBMETA_FLAG_VERIFICATION_DISABLED, VBMETA_MAX_SIZE, Verdict, hex, sha256,
 };
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
@@ -16,84 +24,40 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use avb_graft::{FOOTER_SIZE, parse_footer};
+use avb_verify::Hasher;
+use avb_verify::rsa_pkcs1_verify;
 use core::fmt;
 
 /// The partition name of the root metadata entry.
 pub const ROOT_NAME: &str = "vbmeta";
 
 /// Why a footer-located metadata extent could not be recovered.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ExtractError<E> {
-    /// The partition or its footer is unusable.
-    Malformed(Defect),
-    /// The caller's backing read failed.
-    Read(E),
-    /// The footer declares more metadata than [`VBMETA_MAX_SIZE`].
-    TooLarge { size: u64 },
-}
+pub use avb_format::ExtractError;
 
-impl<E> From<Defect> for ExtractError<E> {
-    fn from(defect: Defect) -> Self {
-        Self::Malformed(defect)
-    }
-}
-
-impl<E: fmt::Display> fmt::Display for ExtractError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Malformed(defect) => write!(f, "{defect}"),
-            Self::Read(error) => write!(f, "backing read failed: {error}"),
-            Self::TooLarge { size } => write!(
-                f,
-                "footer declares {size} metadata bytes, above the {VBMETA_MAX_SIZE}-byte limit"
-            ),
-        }
-    }
-}
-
-/// Read the OEM metadata extent out of a footered partition without holding the
+/// Read the metadata extent out of a footered partition without holding the
 /// partition in memory.
 ///
-/// `read_at(offset, out)` is called twice: once for the final 64 bytes, and once
-/// for the exact metadata extent the footer declares. That is the same two-step
-/// libavb performs, with the same 64 KiB bound on the declared size.
+/// This is the allocating wrapper over `avb-format`'s extent reader: the footer
+/// is read, the declared extent is bounded by [`VBMETA_MAX_SIZE`], that extent
+/// is read, and the result is trimmed to the exact vbmeta size. `read_at` is
+/// called once for the footer and once for the metadata.
 pub fn extract_vbmd<E>(
     image_size: u64,
     mut read_at: impl FnMut(u64, &mut [u8]) -> Result<(), E>,
 ) -> Result<Vec<u8>, ExtractError<E>> {
-    let footer_offset = image_size
-        .checked_sub(FOOTER_SIZE as u64)
-        .ok_or(ExtractError::Malformed(Defect::Truncated))?;
-    let mut footer = [0u8; FOOTER_SIZE];
-    read_at(footer_offset, &mut footer).map_err(ExtractError::Read)?;
-    let parsed = parse_footer(&footer, image_size)
-        .map_err(|error| ExtractError::Malformed(Defect::Graft(error)))?;
-    if parsed.vbmeta_size > VBMETA_MAX_SIZE {
-        return Err(ExtractError::TooLarge {
-            size: parsed.vbmeta_size,
-        });
-    }
-    let len = usize::try_from(parsed.vbmeta_size)
-        .map_err(|_| ExtractError::Malformed(Defect::Overflow))?;
+    let extent = avb_format::vbmd_extent(image_size, &mut read_at)?;
+    let len = usize::try_from(extent.size)
+        .map_err(|_| ExtractError::Malformed(avb_format::Defect::Overflow))?;
     let mut metadata = vec![0u8; len];
-    read_at(parsed.vbmeta_offset, &mut metadata).map_err(ExtractError::Read)?;
-    let exact = meta::exact_metadata(&metadata)?;
+    read_at(extent.offset, &mut metadata).map_err(ExtractError::Read)?;
+    let exact = avb_format::exact_metadata(&metadata).map_err(ExtractError::Malformed)?;
     Ok(exact.to_vec())
 }
 
 /// A digest over a set of vbmeta images, in libavb visit order.
-///
-/// The same ordered extents feed two different hashes, so which one a value is
-/// is always stated by `algorithm`, never implied:
-///
-/// * [`Plan::vbmeta_digest`] is what the OEM ABL computes for its own VBH
-///   (`SET_VBH`, and what KeyMint's rollback compares against) — always SHA-256;
-/// * [`Plan::libavb_cmdline_digest`] is what `androidboot.vbmeta.digest` carries
-///   — the root's algorithm, so SHA-512 for a SHA-512-signed root;
-/// * [`Plan::vbmeta_digest_with`] takes whichever hash the caller asks for.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VbmetaDigest {
+    /// The hash the caller asked for.
     pub algorithm: HashAlg,
     /// The digest itself.
     pub digest: Vec<u8>,
@@ -108,7 +72,6 @@ impl VbmetaDigest {
 }
 
 /// `androidboot.vbmeta.hash_alg`, `.digest` and `.size` as libavb emits them.
-#[cfg(feature = "digest")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CmdlineDigest {
     /// The hash the root's `algorithm_type` selects.
@@ -117,7 +80,6 @@ pub struct CmdlineDigest {
     pub size: u64,
 }
 
-#[cfg(feature = "digest")]
 impl CmdlineDigest {
     pub fn hex(&self) -> String {
         hex(&self.digest)
@@ -141,8 +103,8 @@ struct Node {
     kind: Kind,
     rollback_index_location: u32,
     parent: String,
-    /// Whether the parent chain reaches an ABL-anchored root.
-    parent_anchored: bool,
+    /// Whether the parent chain reaches a root the caller trusted.
+    parent_trusted: bool,
     /// Key the parent's chain descriptor demands, `None` for the root.
     expected_key: Option<Vec<u8>>,
     expected_key_sha256: Option<[u8; 32]>,
@@ -151,7 +113,7 @@ struct Node {
     info: Option<VbmetaInfo>,
     verdict: Option<Verdict>,
     key_sha256: Option<[u8; 32]>,
-    anchored: bool,
+    trusted: bool,
 }
 
 /// The walk from one root `vbmeta`, and every image supplied so far.
@@ -159,59 +121,32 @@ struct Node {
 pub struct Plan {
     nodes: Vec<Node>,
     index: BTreeMap<String, usize>,
-    /// Every key the caller supplied, in file order (anchor first).
-    keys: AblKeys,
-    /// The trusted set: the anchor first, then the explicitly trusted extras.
-    /// A root signed by anything else in `keys` is UNANCHORED.
-    trusted: Vec<AblKey>,
+    /// Every key the caller explicitly trusts for the root.
+    keys: Vec<KeyBlob>,
     root_algorithm: u32,
-    /// The root's own authentication hash, for [`Plan::digest_algorithm`].
-    digest_algorithm: HashAlg,
 }
 
 impl Plan {
-    /// Parse and verify a root `vbmeta` that is *not* anchored to an ABL key.
+    /// Parse and verify a root `vbmeta` without asserting trust.
     ///
-    /// The root must verify against its own embedded key; the resulting verdict
-    /// is `Verified { anchored: false }` — UNANCHORED.
+    /// The root must verify against its own embedded key; the verdict is
+    /// `Verified { trusted: false }`. A caller that needs a trust decision uses
+    /// [`Plan::with_trusted_keys`].
     pub fn new(root: &[u8]) -> Result<Self, Verdict> {
-        Self::build(root, AblKeys::default(), Vec::new(), false)
+        Self::build(root, Vec::new(), false)
     }
 
-    /// Parse and verify a root `vbmeta` that must be anchored to the ABL's
-    /// trust anchor.
+    /// Parse a root `vbmeta`, verify it, and accept it only when its signing key
+    /// is one of the caller's `keys`.
     ///
-    /// The anchor is the **first** key embedded in the ABL
-    /// ([`AblKeys::anchor`]), which is the one the stock ABL's
-    /// `AvbValidateVbmetaPublicKey` byte-compares against. A root signed by a
-    /// *later* embedded key is reported `Verified { anchored: false }` —
-    /// UNANCHORED — and refused here, because the ABL would refuse it; a caller
-    /// that means to trust such a key says so through
-    /// [`Plan::anchored_with_extra`].
-    pub fn anchored(root: &[u8], anchors: &AblKeys) -> Result<Self, Verdict> {
-        Self::anchored_with_extra(root, anchors, &[])
-    }
-
-    /// [`Plan::anchored`], plus keys the caller explicitly trusts.
-    ///
-    /// This is the only way a root signed by a later embedded key is accepted as
-    /// anchored, and it is deliberately explicit.
-    pub fn anchored_with_extra(
-        root: &[u8],
-        anchors: &AblKeys,
-        extra_trusted: &[AblKey],
-    ) -> Result<Self, Verdict> {
-        let Some(anchor) = anchors.anchor() else {
-            return Err(Verdict::Malformed(Defect::NoAnchorKey));
-        };
-        let mut trusted = Vec::with_capacity(1 + extra_trusted.len());
-        trusted.push(anchor.clone());
-        for key in extra_trusted {
-            if !trusted.iter().any(|existing| existing.blob == key.blob) {
-                trusted.push(key.clone());
-            }
+    /// This is the only source of trust. The keys are a set: order carries no
+    /// meaning, and no key is selected from a device image. An empty set is a
+    /// caller error rather than a silent unanchored success.
+    pub fn with_trusted_keys(root: &[u8], keys: &[KeyBlob]) -> Result<Self, Verdict> {
+        if keys.is_empty() {
+            return Err(Verdict::Malformed(Defect::NoTrustedKey));
         }
-        Self::build(root, anchors.clone(), trusted, true)
+        Self::build(root, keys.to_vec(), true)
     }
 
     /// Walk a root `vbmeta` structurally, without requiring it to verify.
@@ -221,51 +156,44 @@ impl Plan {
     /// reported as verified that is not.
     pub fn new_unverified(root: &[u8]) -> Result<Self, Defect> {
         let info = meta::inspect(root)?;
-        let exact = root.get(..info.size).ok_or(Defect::Truncated)?;
-        let keys = AblKeys::default();
-        let trusted: Vec<AblKey> = Vec::new();
-        let verdict = root_verdict(exact, &info, &keys, &trusted);
-        Self::assemble(exact, info, keys, trusted, verdict)
+        let exact = root
+            .get(..info.size)
+            .ok_or(Defect::Format(avb_format::Defect::Truncated))?;
+        let keys: Vec<KeyBlob> = Vec::new();
+        let verdict = root_verdict(exact, &info, &keys);
+        Self::assemble(exact, info, keys, verdict)
     }
 
-    fn build(
-        root: &[u8],
-        keys: AblKeys,
-        trusted: Vec<AblKey>,
-        require_anchored: bool,
-    ) -> Result<Self, Verdict> {
+    fn build(root: &[u8], keys: Vec<KeyBlob>, require_trusted: bool) -> Result<Self, Verdict> {
         let info = meta::inspect(root).map_err(Verdict::Malformed)?;
         let Some(exact) = root.get(..info.size) else {
-            return Err(Verdict::Malformed(Defect::Truncated));
+            return Err(Verdict::Malformed(Defect::Format(
+                avb_format::Defect::Truncated,
+            )));
         };
-        let verdict = root_verdict(exact, &info, &keys, &trusted);
-        // A root that verifies against a key which is not in the trusted set is
-        // UNANCHORED: it is reported as such, and it is not enough for callers
-        // that asked for an anchored root.
+        let verdict = root_verdict(exact, &info, &keys);
         let acceptable =
-            verdict.is_verified() && (!require_anchored || verdict.anchored() == Some(true));
-        let plan = Self::assemble(exact, info, keys, trusted, verdict.clone())
-            .map_err(Verdict::Malformed)?;
+            verdict.is_verified() && (!require_trusted || verdict.trusted() == Some(true));
+        let plan =
+            Self::assemble(exact, info, keys, verdict.clone()).map_err(Verdict::Malformed)?;
         if acceptable { Ok(plan) } else { Err(verdict) }
     }
 
     fn assemble(
         root: &[u8],
         info: VbmetaInfo,
-        keys: AblKeys,
-        trusted: Vec<AblKey>,
+        keys: Vec<KeyBlob>,
         verdict: Verdict,
     ) -> Result<Self, Defect> {
-        let anchored = verdict.anchored().unwrap_or(false);
-        let digest_algorithm =
-            HashAlg::from_algorithm_type(info.header.algorithm).unwrap_or(HashAlg::Sha256);
+        let trusted = verdict.trusted().unwrap_or(false);
+        let root_algorithm = info.header.algorithm;
         let mut plan = Self {
             nodes: vec![Node {
                 name: ROOT_NAME.to_owned(),
                 kind: Kind::Vbmeta,
                 rollback_index_location: 0,
                 parent: String::new(),
-                parent_anchored: anchored,
+                parent_trusted: trusted,
                 expected_key: None,
                 expected_key_sha256: None,
                 children: Vec::new(),
@@ -273,16 +201,14 @@ impl Plan {
                 info: Some(info.clone()),
                 verdict: Some(verdict),
                 key_sha256: Some(info.public_key_sha256),
-                anchored,
+                trusted,
             }],
             index: BTreeMap::new(),
             keys,
-            trusted,
-            root_algorithm: info.header.algorithm,
-            digest_algorithm,
+            root_algorithm,
         };
         plan.index.insert(ROOT_NAME.to_owned(), 0);
-        plan.discover(0, &info, anchored)?;
+        plan.discover(0, &info, trusted, true)?;
         Ok(plan)
     }
 
@@ -301,7 +227,7 @@ impl Plan {
         if self.nodes[node].metadata.is_some() {
             return Err(Rejected {
                 name: name.to_owned(),
-                verdict: Verdict::Malformed(Defect::DuplicatePartition(name.to_owned())),
+                verdict: Verdict::Malformed(Defect::AlreadySupplied(name.to_owned())),
             });
         }
         let verdict = self.check(node, bytes);
@@ -318,14 +244,14 @@ impl Plan {
         match verdict {
             Verdict::Verified {
                 key_sha256,
-                anchored,
+                trusted,
             } => Ok(Accepted {
                 name: name.to_owned(),
                 kind: self.nodes[node].kind,
                 metadata_len,
                 metadata_sha256,
                 key_sha256,
-                anchored,
+                trusted,
                 index,
             }),
             verdict => Err(Rejected {
@@ -338,10 +264,9 @@ impl Plan {
     /// Supply one image read through a caller-supplied reader.
     ///
     /// Same verification as [`Plan::supply`], but the bytes come from
-    /// `read_at(offset, out)`, so a file, a firmware-zip range, a browser blob and
-    /// a BlockIo handle all serve the same code. A `vbmeta*` image is read from
-    /// offset 0 up to libavb's 64 KiB bound; any other name is located through its
-    /// footer exactly as libavb locates it.
+    /// `read_at(offset, out)`. A `vbmeta*` image is read from offset 0 up to
+    /// libavb's 64 KiB bound; any other name is located through its footer
+    /// exactly as libavb locates it.
     pub fn supply_from<E: fmt::Display>(
         &mut self,
         name: &str,
@@ -375,10 +300,13 @@ impl Plan {
                     return Err(Rejected {
                         name: name.to_owned(),
                         verdict: Verdict::Malformed(match error {
-                            ExtractError::Malformed(defect) => defect,
+                            ExtractError::Malformed(defect) => Defect::Format(defect),
                             ExtractError::Read(error) => Defect::Read(format!("{error}")),
                             ExtractError::TooLarge { size } => Defect::Read(format!(
                                 "footer declares {size} metadata bytes, above the {VBMETA_MAX_SIZE}-byte limit"
+                            )),
+                            ExtractError::BufferTooSmall { size } => Defect::Read(format!(
+                                "buffer is smaller than the declared {size}-byte metadata extent"
                             )),
                         }),
                     });
@@ -394,11 +322,12 @@ impl Plan {
             Err(defect) => return Verdict::Malformed(defect),
         };
         let Some(exact) = bytes.get(..info.size) else {
-            return Verdict::Malformed(Defect::Truncated);
+            return Verdict::Malformed(Defect::Format(avb_format::Defect::Truncated));
         };
         let mut verdict = self.verdict_for(node, exact, &info);
-        let anchored = verdict.anchored().unwrap_or(false);
-        if let Err(defect) = self.discover(node, &info, anchored) {
+        let trusted = verdict.trusted().unwrap_or(false);
+        let is_main = node == 0;
+        if let Err(defect) = self.discover(node, &info, trusted, is_main) {
             // A structural defect in the walk is always reported, whether or not
             // the image itself verified.
             verdict = Verdict::Malformed(defect);
@@ -408,7 +337,7 @@ impl Plan {
         let node = &mut self.nodes[node];
         node.metadata = Some(metadata);
         node.key_sha256 = Some(key_sha256);
-        node.anchored = anchored;
+        node.trusted = trusted;
         node.verdict = Some(verdict.clone());
         node.info = Some(info);
         verdict
@@ -420,7 +349,7 @@ impl Plan {
             Err(verdict) => return verdict,
         };
         let record = &self.nodes[node];
-        let anchored = match &record.expected_key {
+        let trusted = match &record.expected_key {
             Some(expected) => {
                 if auth.key != *expected {
                     return Verdict::KeyMismatch {
@@ -428,40 +357,44 @@ impl Plan {
                         actual: auth.key_sha256,
                     };
                 }
-                record.parent_anchored
+                record.parent_trusted
             }
-            None => match key_trust(&self.keys, &self.trusted, &auth.key) {
-                KeyTrust::Anchored => true,
-                KeyTrust::Unanchored => false,
-                KeyTrust::Rejected(expected) => {
-                    return Verdict::KeyMismatch {
-                        expected,
+            None => match root_key_trust(&self.keys, &auth.key) {
+                Some(trusted) => trusted,
+                None => {
+                    return Verdict::UntrustedKey {
                         actual: auth.key_sha256,
                     };
                 }
             },
         };
-        if !identity_ok(&record.name, &info.covered) {
-            return Verdict::WrongPartition {
-                need: record.name.clone(),
-                covered: info.covered.clone(),
-            };
-        }
         Verdict::Verified {
             key_sha256: auth.key_sha256,
-            anchored,
+            trusted,
         }
     }
 
     /// Create a pending node for every chain partition `info` demands.
-    fn discover(&mut self, node: usize, info: &VbmetaInfo, anchored: bool) -> Result<(), Defect> {
+    ///
+    /// libavb permits chain descriptors only in the main image; a chained image
+    /// that carries one is invalid metadata.
+    fn discover(
+        &mut self,
+        node: usize,
+        info: &VbmetaInfo,
+        trusted: bool,
+        is_main: bool,
+    ) -> Result<(), Defect> {
+        if !is_main && !info.chains.is_empty() {
+            return Err(Defect::ChainInChainedImage(self.nodes[node].name.clone()));
+        }
         // Validate every name before mutating anything.
         for chain in &info.chains {
             if chain.name == ROOT_NAME {
                 return Err(Defect::ReservedChainName(chain.name.clone()));
             }
             if self.index.contains_key(&chain.name) {
-                return Err(Defect::DuplicatePartition(chain.name.clone()));
+                return Err(Defect::DuplicateChain(chain.name.clone()));
             }
         }
         if self.nodes.len() + info.chains.len() > MAX_VBMETA_IMAGES {
@@ -476,7 +409,7 @@ impl Plan {
                 kind: Kind::of(&chain.name),
                 rollback_index_location: chain.rollback_index_location,
                 parent: parent.clone(),
-                parent_anchored: anchored,
+                parent_trusted: trusted,
                 expected_key: Some(chain.public_key.clone()),
                 expected_key_sha256: Some(chain.public_key_sha256),
                 children: Vec::new(),
@@ -484,7 +417,7 @@ impl Plan {
                 info: None,
                 verdict: None,
                 key_sha256: None,
-                anchored: false,
+                trusted: false,
             });
             self.index.insert(chain.name.clone(), index);
             children.push(index);
@@ -600,32 +533,24 @@ impl Plan {
                     metadata,
                     metadata_sha256: sha256(metadata),
                     key_sha256: record.key_sha256.unwrap_or([0u8; 32]),
-                    anchored: record.anchored,
+                    trusted: record.trusted,
                     verdict: record.verdict.as_ref()?,
                 })
             })
             .collect()
     }
 
-    /// The OEM ABL's own metadata digest — always **SHA-256** — over the
-    /// supplied images in visit order, each image's exact extent
-    /// (`256 + authentication_data_block_size + auxiliary_data_block_size`), with
-    /// the total size the ABL reports beside it.
+    /// The metadata digest over the supplied images in visit order, each image's
+    /// exact extent, hashed with the caller's chosen algorithm, with the summed
+    /// exact size beside it.
     ///
-    /// This is the `SET_VBH` value: the observed Qualcomm ABL's
-    /// `ComputeVbMetaDigest` is SHA-256 over the ordered extents whatever the
-    /// metadata is signed with. KeyMint uses SHA-256, and libavb's cmdline uses
-    /// the root's algorithm. [`Plan::libavb_cmdline_digest`] is the other one.
-    pub fn vbmeta_digest(&self) -> VbmetaDigest {
-        self.vbmeta_digest_with(HashAlg::Sha256)
-    }
-
-    /// [`Plan::vbmeta_digest`] with an explicitly chosen hash.
+    /// libavb itself has exactly one fixed choice here:
+    /// [`Plan::libavb_cmdline_digest`] uses the root's algorithm. Any other
+    /// value is the caller's, and this crate does not label a SHA-256 result a
+    /// stock platform VBH.
     ///
-    /// The value is computed over the images supplied *so far*, in visit order,
-    /// so a caller that deliberately reports an incomplete set (a plan command)
-    /// can still show what the digest would be; the size is the same sum
-    /// `androidboot.vbmeta.size` carries for that set.
+    /// The value covers the images supplied *so far*, so a caller reporting an
+    /// incomplete set (a plan command) can still show what the digest would be.
     pub fn vbmeta_digest_with(&self, algorithm: HashAlg) -> VbmetaDigest {
         let mut hasher = Hasher::new(algorithm);
         let mut total_size = 0u64;
@@ -640,21 +565,27 @@ impl Plan {
         }
     }
 
-    /// `androidboot.vbmeta.hash_alg`/`.digest`/`.size` exactly as libavb's
-    /// `avb_append_options()` emits them (`avb_cmdline.c:303-359`), or `None`
-    /// when libavb emits nothing at all.
+    /// The summed exact extents of the images supplied so far, in visit order.
     ///
-    /// The hash is selected by the **root's** `algorithm_type`, not by any
-    /// chained image and not by this crate's own preference
-    /// ([`HashAlg::libavb_cmdline`] mirrors the C switch, ML-DSA roots included).
-    /// Nothing is emitted when the root sets
-    /// [`VBMETA_FLAG_VERIFICATION_DISABLED`](crate::VBMETA_FLAG_VERIFICATION_DISABLED):
-    /// `avb_slot_verify.c:1599-1601` takes the unverified path there and never
-    /// calls `avb_append_options()`, so a caller that substitutes such a root is
-    /// substituting a root with no libavb digest at all.
-    #[cfg(feature = "digest")]
+    /// This is the `androidboot.vbmeta.size`-style total that accompanies
+    /// [`Plan::vbmeta_digest_with`].
+    pub fn vbmeta_digest_size(&self) -> u64 {
+        self.ordered_images()
+            .iter()
+            .map(|image| image.metadata.len() as u64)
+            .sum()
+    }
+
+    /// `androidboot.vbmeta.hash_alg`/`.digest`/`.size` exactly as libavb's
+    /// `avb_append_options()` emits them, or `None` when libavb emits nothing.
+    ///
+    /// The hash is selected by the **root's** `algorithm_type`
+    /// ([`HashAlg::libavb_cmdline`]), not by a chained image and not by this
+    /// crate's preference. Nothing is emitted when the root sets
+    /// [`VBMETA_FLAG_VERIFICATION_DISABLED`]: libavb takes the unverified path
+    /// there and never calls `avb_append_options()`.
     pub fn libavb_cmdline_digest(&self) -> Option<CmdlineDigest> {
-        if self.root_info().header.flags & crate::VBMETA_FLAG_VERIFICATION_DISABLED != 0 {
+        if self.root_info().header.flags & VBMETA_FLAG_VERIFICATION_DISABLED != 0 {
             return None;
         }
         let hash_alg = HashAlg::libavb_cmdline(self.root_algorithm)?;
@@ -664,34 +595,6 @@ impl Plan {
             digest: digest.digest,
             size: digest.total_size,
         })
-    }
-
-    /// The AVF **DICE authority** hash: SHA-512 over the embedded public key of
-    /// every supplied image, concatenated in visit order with repeats kept.
-    ///
-    /// GBL and the profile minter agree on that input. GBL's
-    /// `AVFVerificationData::public_key_digest::<Sha512>(None)` hashes
-    /// `header_verified().public_key()` of every loaded vbmeta image, the root
-    /// included (`libgbl/src/android_boot/avf.rs` at `c6716cc`). The profile
-    /// minter (`shared/profile`) hashes the key of each image in the same visit
-    /// order, as exactly `public_key_size` bytes at `public_key_offset` of the
-    /// auxiliary block. Neither deduplicates equal keys, and no layout-crate
-    /// scan is involved.
-    ///
-    /// `Some` only when every discovered image is supplied and verified, the
-    /// state that both paths hash in. `None` otherwise, so a caller can never
-    /// mistake a partial hash for the authority value.
-    #[cfg(feature = "digest")]
-    pub fn authority_sha512(&self) -> Option<[u8; 64]> {
-        if !self.complete() {
-            return None;
-        }
-        let keys: Vec<&[u8]> = self
-            .supplied_info()
-            .iter()
-            .map(|(_, info)| info.public_key.as_slice())
-            .collect();
-        Some(crate::sha512_concat(&keys))
     }
 
     /// Partitions named by a *hash* descriptor in any supplied image: the ones
@@ -711,8 +614,11 @@ impl Plan {
         names
     }
 
-    /// The signed coverage of every supplied image: the evidence behind
-    /// [`Verdict::WrongPartition`].
+    /// The signed coverage of every supplied image, in visit order.
+    ///
+    /// This is raw evidence. libavb does not bind a partition name to a vbmeta
+    /// image, so a caller that wants to judge whether an image covers the
+    /// partition it was supplied for applies its own convention to this value.
     pub fn covered(&self) -> Vec<(String, Vec<String>)> {
         self.preorder()
             .into_iter()
@@ -727,10 +633,7 @@ impl Plan {
     /// Judge one candidate image against the demand this plan holds for `name`,
     /// without recording it.
     ///
-    /// This is the primitive a launch-time resolver needs to compare an on-slot
-    /// candidate with a stored one before choosing between them (ablwrap's
-    /// `ablwrap-resolve` crate is the only such caller today). The verdict is
-    /// exactly what [`Plan::supply`] would return;
+    /// The verdict is exactly what [`Plan::supply`] would return;
     /// `Malformed(UnknownPartition)` when the plan does not demand that name.
     pub fn judge(&self, name: &str, bytes: &[u8]) -> Verdict {
         let Some(&node) = self.index.get(name) else {
@@ -741,15 +644,16 @@ impl Plan {
             Err(defect) => return Verdict::Malformed(defect),
         };
         let Some(exact) = bytes.get(..info.size) else {
-            return Verdict::Malformed(Defect::Truncated);
+            return Verdict::Malformed(Defect::Format(avb_format::Defect::Truncated));
         };
         self.verdict_for(node, exact, &info)
     }
 
     /// SHA-256 of the key the plan demands for `name`.
     ///
-    /// `None` for the root (which is judged against the ABL keys, not against a
-    /// parent's chain descriptor) and for names the plan does not demand.
+    /// `None` for the root (which is judged against the caller's keys, not
+    /// against a parent's chain descriptor) and for names the plan does not
+    /// demand.
     pub fn demanded_key_sha256(&self, name: &str) -> Option<[u8; 32]> {
         self.index
             .get(name)
@@ -795,15 +699,14 @@ impl Plan {
     }
 
     /// The hash of the root's own `algorithm_type`
-    /// ([`HashAlg::from_algorithm_type`]), defaulting to SHA-256 for a root that
-    /// is unsigned (`algorithm_type` NONE) or ML-DSA-signed.
+    /// ([`HashAlg::from_algorithm_type`]), or `None` for an unsigned or
+    /// ML-DSA-signed root.
     ///
-    /// This is the root's **authentication** hash. It is not the ABL's VBH
-    /// ([`Plan::vbmeta_digest`], always SHA-256) and not necessarily the
+    /// This is the root's **authentication** hash. It is not necessarily the
     /// cmdline's hash ([`Plan::libavb_cmdline_digest`], which maps an ML-DSA root
-    /// to SHA-256 while this returns SHA-256 only by the default).
-    pub fn digest_algorithm(&self) -> HashAlg {
-        self.digest_algorithm
+    /// to SHA-256).
+    pub fn digest_algorithm(&self) -> Option<HashAlg> {
+        HashAlg::from_algorithm_type(self.root_algorithm)
     }
 
     /// The exact root metadata extent.
@@ -811,23 +714,9 @@ impl Plan {
         self.nodes[0].metadata.as_deref().unwrap_or(&[])
     }
 
-    /// The key set this plan trusts, anchor first.
-    ///
-    /// Index 0 is the ABL's trust anchor; any later entry was passed as
-    /// `extra_trusted`.
-    pub fn trusted_keys(&self) -> &[AblKey] {
-        &self.trusted
-    }
-
-    /// Every key the caller supplied, anchor first — including later embedded
-    /// keys that are not trusted, so a report can show them.
-    pub fn key_set(&self) -> &AblKeys {
+    /// The keys this plan trusts for the root.
+    pub fn trusted_keys(&self) -> &[KeyBlob] {
         &self.keys
-    }
-
-    /// The trust anchor this plan checked the root against.
-    pub fn trust_anchor(&self) -> Option<&AblKey> {
-        self.trusted.first()
     }
 
     /// Parsed root metadata.
@@ -841,77 +730,62 @@ impl Plan {
         self.nodes[0].verdict.as_ref().expect("root verdict")
     }
 
-    /// Whether the root is anchored to an ABL key.
-    pub fn is_anchored(&self) -> bool {
-        self.nodes[0].anchored
+    /// Whether the root verified against a caller-supplied trusted key.
+    pub fn is_trusted(&self) -> bool {
+        self.nodes[0].trusted
     }
 
-    /// The root's own build properties.
-    pub fn root_properties(&self) -> Properties {
+    /// The root's own property descriptors, in descriptor order.
+    pub fn root_properties(&self) -> &[Property] {
         self.nodes[0]
             .info
             .as_ref()
-            .map(|info| info.properties.clone())
+            .map(|info| info.properties.as_slice())
             .unwrap_or_default()
     }
 
-    /// The build properties the ABL prefers: `boot` metadata first, else root.
-    pub fn properties(&self) -> Properties {
-        let boot = self.boot_properties();
-        if boot.is_empty() {
-            self.root_properties()
-        } else {
-            boot.or(&self.root_properties())
-        }
-    }
-
-    fn boot_properties(&self) -> Properties {
-        self.index
-            .get("boot")
-            .and_then(|&node| self.nodes[node].info.as_ref())
-            .map(|info| info.properties.clone())
-            .unwrap_or_default()
-    }
-
-    /// Provenance of [`Plan::properties`], as the evidence report words it.
-    pub fn properties_source(&self) -> &'static str {
-        if !self.boot_properties().is_empty() {
-            "from the boot metadata properties the ABL prefers"
-        } else if !self.root_properties().is_empty() {
-            "from the root vbmeta properties (no boot metadata supplied)"
-        } else {
-            "absent: the ABL falls back to the boot header fields"
-        }
+    /// Property descriptors of one supplied image, in descriptor order.
+    pub fn image_properties(&self, name: &str) -> Option<&[Property]> {
+        self.image_info(name).map(|info| info.properties.as_slice())
     }
 }
 
-/// Does the signed coverage of an image identify it as the demanded partition?
+/// The root's verdict: self-verifying, and trusted only when its key is one the
+/// caller explicitly supplied.
 ///
-/// AVB does not bind a partition name to a vbmeta image, so this is a convention,
-/// not a signature check: `vbmeta_<group>` must declare coverage for `<group>`,
-/// and any other name must be covered by itself or a name in its group. An image
-/// that names no partition at all cannot be judged this way and is accepted.
-fn identity_ok(need: &str, covered: &[String]) -> bool {
-    if covered.is_empty() {
-        return true;
+/// With no keys (`Plan::new`) a self-verifying root is `Verified { trusted:
+/// false }`; with keys, any byte-equal key makes it trusted, and no key is an
+/// [`Verdict::UntrustedKey`].
+fn root_verdict(exact: &[u8], info: &VbmetaInfo, keys: &[KeyBlob]) -> Verdict {
+    let auth = match verify_auth(exact, &info.header) {
+        Ok(auth) => auth,
+        Err(verdict) => return verdict,
+    };
+    match root_key_trust(keys, &auth.key) {
+        Some(trusted) => Verdict::Verified {
+            key_sha256: auth.key_sha256,
+            trusted,
+        },
+        None => Verdict::UntrustedKey {
+            actual: auth.key_sha256,
+        },
     }
-    let group = need.strip_prefix("vbmeta_");
-    covered.iter().any(|name| match group {
-        Some(group) => {
-            name == group
-                || name.starts_with(&format!("{group}_"))
-                || group.starts_with(&format!("{name}_"))
-        }
-        None => {
-            name == need
-                || name.starts_with(&format!("{need}_"))
-                || need.starts_with(&format!("{name}_"))
-        }
-    })
+}
+
+/// How the root's signing key relates to the keys the caller supplied.
+///
+/// `None` means keys were supplied and none is the signing key.
+fn root_key_trust(keys: &[KeyBlob], key: &[u8]) -> Option<bool> {
+    if keys.is_empty() {
+        return Some(false);
+    }
+    keys.iter()
+        .any(|candidate| candidate.blob == key)
+        .then_some(true)
 }
 
 /// Verify one image against its own embedded key: hash, then signature.
-fn verify_auth(bytes: &[u8], head: &Header) -> Result<Auth, Verdict> {
+fn verify_auth(bytes: &[u8], head: &avb_format::Header) -> Result<Auth, Verdict> {
     let algorithm = match HashAlg::from_algorithm_type(head.algorithm) {
         Some(algorithm) => algorithm,
         None if head.algorithm == 0 => return Err(Verdict::Unsigned),
@@ -943,7 +817,9 @@ fn verify_auth(bytes: &[u8], head: &Header) -> Result<Auth, Verdict> {
     hasher.update(
         bytes
             .get(..HEADER_SIZE)
-            .ok_or(Verdict::Malformed(Defect::Truncated))?,
+            .ok_or(Verdict::Malformed(Defect::Format(
+                avb_format::Defect::Truncated,
+            )))?,
     );
     hasher.update(auxiliary);
     let computed = hasher.finish();
@@ -960,70 +836,13 @@ fn verify_auth(bytes: &[u8], head: &Header) -> Result<Auth, Verdict> {
         auth_start + head.signature_offset,
         head.signature_size,
     )?;
-    if !rsa::rsa_pkcs1_verify(public_key, signature, &computed, algorithm) {
+    if !rsa_pkcs1_verify(public_key, signature, &computed, algorithm) {
         return Err(Verdict::SignatureMismatch);
     }
     Ok(Auth {
         key: public_key.to_vec(),
         key_sha256: sha256(public_key),
     })
-}
-
-/// The root's verdict: self-verifying, and anchored only when its key is one the
-/// caller trusts — the ABL's **first** embedded key, or an explicitly trusted
-/// extra.
-///
-/// A root signed by a later embedded key is `Verified { anchored: false }`,
-/// i.e. UNANCHORED: the key is in the ABL, but it is not the one the stock
-/// `AvbValidateVbmetaPublicKey` byte-compares against. Any other key is a
-/// `KeyMismatch` against the anchor.
-fn root_verdict(exact: &[u8], info: &VbmetaInfo, keys: &AblKeys, trusted: &[AblKey]) -> Verdict {
-    let auth = match verify_auth(exact, &info.header) {
-        Ok(auth) => auth,
-        Err(verdict) => return verdict,
-    };
-    match key_trust(keys, trusted, &auth.key) {
-        KeyTrust::Anchored => Verdict::Verified {
-            key_sha256: auth.key_sha256,
-            anchored: true,
-        },
-        KeyTrust::Unanchored => Verdict::Verified {
-            key_sha256: auth.key_sha256,
-            anchored: false,
-        },
-        KeyTrust::Rejected(expected) => Verdict::KeyMismatch {
-            expected,
-            actual: auth.key_sha256,
-        },
-    }
-}
-
-/// How the root's signing key relates to the keys the caller supplied.
-enum KeyTrust {
-    /// The anchor or an explicitly trusted extra.
-    Anchored,
-    /// Embedded in the ABL, but not the anchor: UNANCHORED. Also the answer
-    /// when the caller supplied no keys at all (`Plan::new`).
-    Unanchored,
-    /// Not a key the caller supplied: rejected against the anchor's digest.
-    Rejected([u8; 32]),
-}
-
-fn key_trust(keys: &AblKeys, trusted: &[AblKey], key: &[u8]) -> KeyTrust {
-    if keys.is_empty() {
-        return KeyTrust::Unanchored;
-    }
-    if trusted.iter().any(|candidate| candidate.blob == key) {
-        return KeyTrust::Anchored;
-    }
-    if keys.keys().iter().any(|candidate| candidate.blob == key) {
-        return KeyTrust::Unanchored;
-    }
-    KeyTrust::Rejected(
-        keys.anchor()
-            .map(|anchor| anchor.sha256)
-            .unwrap_or([0u8; 32]),
-    )
 }
 
 fn region(bytes: &[u8], start: u64, len: u64) -> Result<&[u8], Verdict> {
@@ -1034,5 +853,7 @@ fn region(bytes: &[u8], start: u64, len: u64) -> Result<&[u8], Verdict> {
         .ok_or(Verdict::Malformed(Defect::Overflow))?;
     bytes
         .get(start..end)
-        .ok_or(Verdict::Malformed(Defect::Truncated))
+        .ok_or(Verdict::Malformed(Defect::Format(
+            avb_format::Defect::Truncated,
+        )))
 }

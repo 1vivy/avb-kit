@@ -25,7 +25,7 @@
 //!   block aligned, just below the final 64-byte footer — what a partition's own
 //!   geometry allows when the stock placement is unusable or the partition is
 //!   freshly initialized.
-//! * [`Placement::At(offset)`] puts it at an explicit block-aligned offset.
+//! * [`Placement::At`] puts it at an explicit block-aligned offset.
 //!
 //! A payload extent is never invented. [`Extent`] states where the claim comes
 //! from, and the plan reports in [`WritePlan::evidence`] which one it actually
@@ -76,10 +76,7 @@ pub enum Error {
     /// Structural admission by `avb-graft` failed.
     Graft(avb_graft::Error),
     /// The metadata cannot fit below the partition's final 64-byte footer.
-    DoesNotFit {
-        image_size: u64,
-        metadata_size: u64,
-    },
+    DoesNotFit { image_size: u64, metadata_size: u64 },
     /// An explicit offset is not a multiple of the block size.
     Alignment { offset: u64, block_size: u64 },
     /// The plan would overwrite bytes that are not tail padding.
@@ -337,9 +334,7 @@ pub fn plan<E>(
             return Err(Error::Alignment { offset, block_size }.into());
         }
         Placement::At(offset)
-            if offset
-                .checked_add(metadata_size)
-                .ok_or(Error::Overflow)?
+            if offset.checked_add(metadata_size).ok_or(Error::Overflow)?
                 > image_size - FOOTER_SIZE as u64 =>
         {
             return Err(Error::DoesNotFit {
@@ -352,8 +347,7 @@ pub fn plan<E>(
         // Handled above, and `Placement` is `Copy`.
         Placement::KeepOriginal => unreachable!(),
     };
-    let (payload_end, evidence, stock) =
-        locate(extent, image_size, offset, &mut read_at)?;
+    let (payload_end, evidence, stock) = locate(extent, image_size, offset, &mut read_at)?;
     if payload_end > offset {
         return Err(Error::PayloadOverlap {
             payload_end,
@@ -541,8 +535,7 @@ fn locate<E>(
             let mut header = [0u8; BLOCK_SIZE as usize];
             let count = core::cmp::min(BLOCK_SIZE, image_size) as usize;
             read(read_at, image_size, 0, &mut header[..count])?;
-            let declared =
-                payload_extent(&header[..count], format).map_err(ReadError::Layout)?;
+            let declared = payload_extent(&header[..count], format).map_err(ReadError::Layout)?;
             let evidence = match declared.version {
                 Some(version) => Evidence::BootHeader { version },
                 None => Evidence::DtboTable,

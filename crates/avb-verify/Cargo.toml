@@ -1,0 +1,17 @@
+[package]
+name = "avb-verify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AVB hash selection, SHA-256/SHA-512 helpers and RSA PKCS#1 v1.5 signature verification"
+
+[dependencies]
+avb-format = { path = "../../crates/avb-format" }
+sha2.workspace = true
+
+[dev-dependencies]
+num-bigint.workspace = true
+
+[lints]
+workspace = true

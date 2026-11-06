@@ -1,0 +1,15 @@
+[package]
+name = "avb-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Dependency-free AVB0/AVBf framing, typed descriptors and AVB RSA public-key validation"
+
+[dependencies]
+
+[dev-dependencies]
+num-bigint.workspace = true
+
+[lints]
+workspace = true
