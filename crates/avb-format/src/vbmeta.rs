@@ -404,27 +404,53 @@ fn parse_kernel_cmdline(body: &[u8]) -> Result<KernelCmdline<'_>, Defect> {
 }
 
 fn parse_chain(body: &[u8]) -> Result<ChainPartition<'_>, Defect> {
-    if body.len() < CHAIN_PREFIX {
+    let chain = ChainPartition::decode(body)?;
+    // A chain that libavb verifies names the key it expects.
+    if chain.public_key.is_empty() {
         return Err(Defect::ChainPartition);
     }
-    let rollback_index_location = be_u32(body, 0).ok_or(Defect::ChainPartition)?;
-    // libavb declares both lengths as u32 in `AvbChainPartitionDescriptor`.
-    let name_len = index(u64::from(be_u32(body, 4).ok_or(Defect::ChainPartition)?))?;
-    let key_len = index(u64::from(be_u32(body, 8).ok_or(Defect::ChainPartition)?))?;
-    if name_len == 0 || key_len == 0 {
-        return Err(Defect::ChainPartition);
+    Ok(chain)
+}
+
+impl<'a> ChainPartition<'a> {
+    /// Decode the chain fields without requiring a public key.
+    ///
+    /// A caller that verifies the chained image validates the key separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Defect::ChainPartition`] for truncated fields, an empty name,
+    /// or a name that is not UTF-8. Returns [`Defect::Overflow`] when an offset
+    /// does not fit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert!(avb_format::ChainPartition::decode(&[]).is_err());
+    /// ```
+    pub fn decode(body: &'a [u8]) -> Result<Self, Defect> {
+        if body.len() < CHAIN_PREFIX {
+            return Err(Defect::ChainPartition);
+        }
+        let rollback_index_location = be_u32(body, 0).ok_or(Defect::ChainPartition)?;
+        // libavb declares both lengths as u32 in `AvbChainPartitionDescriptor`.
+        let name_len = index(u64::from(be_u32(body, 4).ok_or(Defect::ChainPartition)?))?;
+        let key_len = index(u64::from(be_u32(body, 8).ok_or(Defect::ChainPartition)?))?;
+        if name_len == 0 {
+            return Err(Defect::ChainPartition);
+        }
+        let name_end = CHAIN_PREFIX.checked_add(name_len).ok_or(Defect::Overflow)?;
+        let key_end = name_end.checked_add(key_len).ok_or(Defect::Overflow)?;
+        Ok(Self {
+            rollback_index_location,
+            flags: be_u32(body, 12).ok_or(Defect::ChainPartition)?,
+            name: text(
+                body.get(CHAIN_PREFIX..name_end)
+                    .ok_or(Defect::ChainPartition)?,
+            )?,
+            public_key: body.get(name_end..key_end).ok_or(Defect::ChainPartition)?,
+        })
     }
-    let name_end = CHAIN_PREFIX.checked_add(name_len).ok_or(Defect::Overflow)?;
-    let key_end = name_end.checked_add(key_len).ok_or(Defect::Overflow)?;
-    Ok(ChainPartition {
-        rollback_index_location,
-        flags: be_u32(body, 12).ok_or(Defect::ChainPartition)?,
-        name: text(
-            body.get(CHAIN_PREFIX..name_end)
-                .ok_or(Defect::ChainPartition)?,
-        )?,
-        public_key: body.get(name_end..key_end).ok_or(Defect::ChainPartition)?,
-    })
 }
 
 /// Parse one descriptor body by tag.
@@ -474,7 +500,22 @@ impl<'a> Descriptors<'a> {
         bytes.get(self.cursor..).unwrap_or(&[])
     }
 
-    fn next_raw(&mut self) -> Option<Result<(u64, &'a [u8]), Defect>> {
+    /// Read the next descriptor as its wire tag and body, without parsing the
+    /// body.
+    ///
+    /// A caller that needs only one descriptor kind can skip the others
+    /// instead of rejecting an image whose other bodies are unreadable.
+    /// The descriptor length must be 8-byte aligned, and the iterator stops
+    /// after the first framing error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut frames = avb_format::Descriptors::new(&[0; 16]);
+    /// assert_eq!(frames.next_frame().map(|frame| frame.map(|(tag, body)| (tag, body.len()))), Some(Ok((0, 0))));
+    /// assert!(frames.next_frame().is_none());
+    /// ```
+    pub fn next_frame(&mut self) -> Option<Result<(u64, &'a [u8]), Defect>> {
         let bytes = self.bytes;
         if self.failed || self.cursor >= bytes.len() {
             return None;
@@ -498,6 +539,11 @@ impl<'a> Descriptors<'a> {
                 return Some(Err(Defect::Descriptor));
             }
         };
+        // A descriptor body is a multiple of eight bytes.
+        if body_len & 7 != 0 {
+            self.failed = true;
+            return Some(Err(Defect::DescriptorBounds));
+        }
         let Some(total) = 16usize.checked_add(body_len) else {
             self.failed = true;
             return Some(Err(Defect::Overflow));
@@ -516,7 +562,7 @@ impl<'a> Iterator for Descriptors<'a> {
     type Item = Result<Descriptor<'a>, Defect>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_raw()
+        self.next_frame()
             .map(|item| item.and_then(|(tag, body)| descriptor(tag, body)))
     }
 }
@@ -592,7 +638,7 @@ pub fn inspect(bytes: &[u8]) -> Result<VbmetaInfo<'_>, Defect> {
     let head = header(bytes)?;
     let view = window(bytes, &head)?;
     let mut iter = Descriptors::new(view.descriptors);
-    while let Some(item) = iter.next_raw() {
+    while let Some(item) = iter.next_frame() {
         let (tag, body) = item?;
         match tag {
             DESCRIPTOR_TAG_PROPERTY
