@@ -6,6 +6,7 @@ members = [
     "crates/avb-graft",
     "crates/avb-image",
     "crates/avb-verify",
+    "tools/avbkit",
 ]
 
 [workspace.package]

@@ -1,0 +1,20 @@
+[package]
+name = "avbkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Host commands over the AOSP AVB format: inspect, extract, verify-chain, graft, place"
+
+[[bin]]
+name = "avbkit"
+path = "src/main.rs"
+
+[dependencies]
+avb-chain = { path = "../../crates/avb-chain" }
+avb-format = { path = "../../crates/avb-format" }
+avb-graft = { path = "../../crates/avb-graft" }
+avb-image = { path = "../../crates/avb-image" }
+
+[lints]
+workspace = true
