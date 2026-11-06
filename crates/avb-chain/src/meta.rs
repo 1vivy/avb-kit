@@ -23,6 +23,8 @@ use avb_verify::sha256;
 pub struct ChainDescriptor {
     /// Rollback index slot the chain uses for this partition.
     pub rollback_index_location: u32,
+    /// The descriptor's `flags` word. Bit 0 is `DO_NOT_USE_AB`.
+    pub flags: u32,
     /// Partition base name, without an `_a`/`_b` suffix.
     pub name: String,
     /// The public key blob the parent demands for this partition.
@@ -99,6 +101,7 @@ pub fn inspect(bytes: &[u8]) -> Result<VbmetaInfo, Defect> {
                 cover(&mut covered, chain.name);
                 chains.push(ChainDescriptor {
                     rollback_index_location: chain.rollback_index_location,
+                    flags: chain.flags,
                     name: chain.name.to_owned(),
                     public_key: chain.public_key.to_vec(),
                     public_key_sha256: sha256(chain.public_key),

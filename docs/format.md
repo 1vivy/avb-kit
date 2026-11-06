@@ -120,8 +120,9 @@ descriptors. It skips unknown tags without failing.
 | 76 | `partition_name_len` | Partition name, UTF-8 |
 | ... | `public_key_len` | AVB public key blob |
 
-The partition name has no `_a`/`_b` suffix. The key blob uses the layout in the
-next section.
+The partition name has no `_a`/`_b` suffix. `avb_slot_verify.c` appends the slot
+suffix unless bit 0 of `flags` is set. `Need::partition_name` in `avb-chain`
+applies that rule. The key blob uses the layout in the next section.
 
 ### Hash descriptor
 

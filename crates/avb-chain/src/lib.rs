@@ -14,6 +14,8 @@
 //!   verified first;
 //! * images are recorded depth-first in descriptor order, and the ordered set
 //!   feeds the metadata digests;
+//! * a chain descriptor's `DO_NOT_USE_AB` flag removes the slot suffix from the
+//!   partition name ([`Need::partition_name`]);
 //! * `androidboot.vbmeta.*` is emitted from the root's algorithm, and nothing
 //!   is emitted when the root sets verification-disabled.
 //!
@@ -44,8 +46,8 @@ pub mod meta;
 pub mod plan;
 
 pub use avb_format::{
-    HEADER_SIZE, MAX_VBMETA_IMAGES, VBMETA_FLAG_HASHTREE_DISABLED,
-    VBMETA_FLAG_VERIFICATION_DISABLED, VBMETA_MAX_SIZE,
+    CHAIN_PARTITION_FLAG_DO_NOT_USE_AB, HEADER_SIZE, MAX_VBMETA_IMAGES,
+    VBMETA_FLAG_HASHTREE_DISABLED, VBMETA_FLAG_VERIFICATION_DISABLED, VBMETA_MAX_SIZE,
 };
 pub use avb_verify::HashAlg;
 pub use avb_verify::sha256;
@@ -54,6 +56,7 @@ pub use plan::{
     CmdlineDigest, ExtractError, Plan, ROOT_NAME, VbmetaDigest, WalkNode, extract_vbmd,
 };
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
@@ -238,10 +241,45 @@ pub struct Need {
     pub kind: Kind,
     /// Rollback index location the parent's chain descriptor names.
     pub rollback_index_location: u32,
+    /// The parent chain descriptor's `flags` word, zero for the root.
+    pub flags: u32,
     /// SHA-256 of the key the parent demands for this image.
     pub expected_key_sha256: [u8; 32],
     /// Partition that demanded this image (`vbmeta` for the root's children).
     pub parent: String,
+}
+
+impl Need {
+    /// The partition to read for `slot_suffix`, as
+    /// `avb_slot_verify.c` builds the name.
+    ///
+    /// The suffix is appended unless the chain descriptor sets
+    /// [`CHAIN_PARTITION_FLAG_DO_NOT_USE_AB`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use avb_chain::{CHAIN_PARTITION_FLAG_DO_NOT_USE_AB, Kind, Need};
+    ///
+    /// let mut need = Need {
+    ///     name: "boot".to_owned(),
+    ///     kind: Kind::Footered,
+    ///     rollback_index_location: 2,
+    ///     flags: 0,
+    ///     expected_key_sha256: [0; 32],
+    ///     parent: "vbmeta".to_owned(),
+    /// };
+    /// assert_eq!(need.partition_name("_a"), "boot_a");
+    /// need.flags = CHAIN_PARTITION_FLAG_DO_NOT_USE_AB;
+    /// assert_eq!(need.partition_name("_a"), "boot");
+    /// ```
+    pub fn partition_name(&self, slot_suffix: &str) -> String {
+        if self.flags & CHAIN_PARTITION_FLAG_DO_NOT_USE_AB == 0 {
+            format!("{}{slot_suffix}", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 /// What happened to one supplied image.

@@ -102,6 +102,8 @@ struct Node {
     name: String,
     kind: Kind,
     rollback_index_location: u32,
+    /// The chain descriptor's `flags` word, zero for the root.
+    flags: u32,
     parent: String,
     /// Whether the parent chain reaches a root the caller trusted.
     parent_trusted: bool,
@@ -192,6 +194,7 @@ impl Plan {
                 name: ROOT_NAME.to_owned(),
                 kind: Kind::Vbmeta,
                 rollback_index_location: 0,
+                flags: 0,
                 parent: String::new(),
                 parent_trusted: trusted,
                 expected_key: None,
@@ -408,6 +411,7 @@ impl Plan {
                 name: chain.name.clone(),
                 kind: Kind::of(&chain.name),
                 rollback_index_location: chain.rollback_index_location,
+                flags: chain.flags,
                 parent: parent.clone(),
                 parent_trusted: trusted,
                 expected_key: Some(chain.public_key.clone()),
@@ -489,6 +493,7 @@ impl Plan {
                     name: record.name.clone(),
                     kind: record.kind,
                     rollback_index_location: record.rollback_index_location,
+                    flags: record.flags,
                     expected_key_sha256: record.expected_key_sha256.unwrap_or([0u8; 32]),
                     parent: record.parent.clone(),
                 }
