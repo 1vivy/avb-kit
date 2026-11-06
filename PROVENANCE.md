@@ -30,6 +30,7 @@ split it. Each item moved to the crate that owns its behavior.
 | `avb-meta::rsa::rsa_pkcs1_verify` and the in-crate Montgomery arithmetic | `avb-verify` |
 | `avb-meta::plan::{Plan, Verdict, Need, Accepted, Rejected, VbmetaDigest, CmdlineDigest, extract_vbmd}` | `avb-chain` |
 | `avb-graft::{Graft, plan_graft, replacement_footer, ReadError}` | `avb-graft` |
+| `patina_qcom_oem::avb::{Color, AvbDigest, VerificationReport}` | `avb-format` (ODP `main`; the values follow KeyMint `VerifiedBootState` and `libavb/avb_vbmeta_image.h`) |
 | `avb-meta::api` | Dropped. The owner approved the removal. It had no consumer. |
 
 The original RSA verification is in-crate fixed-width Montgomery arithmetic. It

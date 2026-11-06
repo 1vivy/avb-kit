@@ -10,7 +10,7 @@ License: Apache-2.0. Every library is `no_std`. Only the CLI uses `std`.
 
 | Crate | Runtime | Dependencies | Purpose |
 |---|---|---|---|
-| `avb-format` | `no_std`, no allocation | none | `AVB0` header, typed descriptors and iteration, `AVBf` footer parse and serialize, structural validation, exact metadata extent, footer extraction, AVB RSA public key blob parse and validation |
+| `avb-format` | `no_std`, no allocation | none | `AVB0` header, typed descriptors and iteration, `AVBf` footer parse and serialize, structural validation, exact metadata extent, footer extraction, AVB RSA public key blob parse and validation, verified-boot result values |
 | `avb-verify` | `no_std` + `alloc` | `sha2`, `avb-format` | SHA-256 and SHA-512 helpers, the AVB algorithm table, RSA PKCS#1 v1.5 verification from an AVB key blob |
 | `avb-chain` | `no_std` + `alloc` | `avb-format`, `avb-verify` | Chain plan: caller-supplied trusted keys, needs, supply, verdicts, metadata digests, properties |
 | `avb-graft` | `no_std`, no allocation | `avb-format` | Graft plan and read overlay for a metadata and footer replacement |

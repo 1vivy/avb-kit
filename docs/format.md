@@ -226,6 +226,27 @@ Two digests use that order:
 `avb-chain` records the order and computes both digests on request. The ordered
 set is the exact metadata extent of each image, with no partition padding.
 
+## Verified-boot result values
+
+`avb-format::report` models the result values that a verifier reports for a
+device. The module holds data only. It selects no key and decides no trust.
+
+| Field | Meaning | Source |
+|---|---|---|
+| `Color` | Android verified-boot state, values 0 to 3 | `system/security/keystore2` and KeyMint `VerifiedBootState` |
+| `red_eio` | dm-verity reported an EIO error with the base state | `libavb/avb_slot_verify.h` |
+| `digest` | libavb metadata digest and its algorithm | `libavb/avb_cmdline.c` |
+| `os_version` | `(A << 14) \| (B << 7) \| C` | `libavb/avb_vbmeta_image.h` |
+| `security_patch` | `(day << 11) \| ((year - 2000) << 4) \| month` | `libavb/avb_vbmeta_image.h` |
+
+`AvbDigest` keeps the algorithm with the bytes. A SHA-256 value has 32 bytes. A
+SHA-512 value has 64 bytes. `AvbDigest::sha256` returns `None` for a SHA-512
+value, so a caller never shortens it.
+
+`avb-chain::VbmetaDigest` is a different type. It records a caller-selected
+algorithm, the total metadata size and an allocated byte vector for a chain
+walk. `AvbDigest` is a fixed-size `Copy` value for one verifier result.
+
 ## What each crate checks
 
 | Check | Crate |

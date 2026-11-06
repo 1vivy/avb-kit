@@ -22,6 +22,7 @@ pub mod extract;
 pub mod footer;
 pub mod framing;
 pub mod key;
+pub mod report;
 pub mod vbmeta;
 
 pub use extract::{ExtractError, VbmdExtent, extract_vbmd, vbmd_extent};
@@ -32,6 +33,7 @@ pub use key::{
     RSA_KEY_HEADER_SIZE, RSA_MAX_KEY_BYTES, key_blob_len, key_is_valid, key_modulus, key_num_bits,
     key_rr, n0inv, rr_is_consistent, validate_key_blob,
 };
+pub use report::{AvbDigest, Color, VerificationReport};
 pub use vbmeta::{
     ChainPartition, DESCRIPTOR_TAG_CHAIN_PARTITION, DESCRIPTOR_TAG_HASH, DESCRIPTOR_TAG_HASHTREE,
     DESCRIPTOR_TAG_KERNEL_CMDLINE, DESCRIPTOR_TAG_PROPERTY, Defect, Descriptor, DescriptorIter,
