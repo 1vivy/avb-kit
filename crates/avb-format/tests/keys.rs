@@ -1,6 +1,6 @@
 use avb_format::{
     AvbRSAPublicKeyHeader, RSA_KEY_HEADER_SIZE, key_blob_len, key_is_valid, key_modulus,
-    key_num_bits, key_rr, n0inv, rr_is_consistent, validate_key_blob,
+    key_num_bits, key_rr, n0inv, rr, rr_is_consistent, validate_key_blob,
 };
 use num_bigint::BigUint;
 
@@ -55,6 +55,9 @@ fn pow2_mod_matches_num_bigint() {
         let expected = rr_of(&modulus, bits as usize);
         assert_eq!(expected.len(), modulus.len());
         assert!(rr_is_consistent(&modulus, bits, &expected));
+        let mut written = vec![0u8; modulus.len()];
+        assert!(rr(&modulus, bits, &mut written), "the writer fills rr");
+        assert_eq!(written, expected);
         let mut wrong = expected.clone();
         wrong[modulus.len() - 1] ^= 1;
         assert!(!rr_is_consistent(&modulus, bits, &wrong));
@@ -64,6 +67,11 @@ fn pow2_mod_matches_num_bigint() {
         "not full width"
     );
     assert!(!rr_is_consistent(&[], 16, &[]));
+    assert!(!rr(&[0x01, 0x02], 16, &mut [0u8; 2]), "not full width");
+    assert!(
+        !rr(&alternating_modulus(256), 2048, &mut [0u8; 2]),
+        "short rr"
+    );
 }
 
 #[test]

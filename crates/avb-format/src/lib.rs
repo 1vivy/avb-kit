@@ -31,7 +31,7 @@ pub use framing::{Error, Result, Vbmeta, validate_vbmeta};
 pub use key::{
     AvbRSAPublicKeyHeader, RSA_KEY_BITS, RSA_KEY_BITS_2048, RSA_KEY_BITS_4096, RSA_KEY_BITS_8192,
     RSA_KEY_HEADER_SIZE, RSA_MAX_KEY_BYTES, key_blob_len, key_is_valid, key_modulus, key_num_bits,
-    key_rr, n0inv, rr_is_consistent, validate_key_blob,
+    key_rr, n0inv, rr, rr_is_consistent, validate_key_blob,
 };
 pub use report::{AvbDigest, Color, VerificationReport};
 pub use vbmeta::{

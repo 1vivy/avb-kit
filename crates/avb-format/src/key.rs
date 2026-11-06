@@ -107,21 +107,21 @@ fn trim(bytes: &[u8]) -> &[u8] {
     &bytes[first..]
 }
 
-/// Whether `rr == 2^(2*bits) mod modulus`.
-///
-/// The exponent is computed by modular doubling in fixed buffers, so this
-/// function needs no allocation and no big-integer dependency. It returns
-/// `false` for a modulus that is not exactly `bits / 8` bytes and full width.
-pub fn rr_is_consistent(modulus: &[u8], bits: u32, rr: &[u8]) -> bool {
+/// Whether the modulus and the `rr` buffer have the geometry `bits` requires.
+fn rr_geometry_ok(modulus: &[u8], bits: u32, rr_len: usize) -> bool {
     let width = bits as usize / 8;
-    if width == 0
-        || width > RSA_MAX_KEY_BYTES
-        || modulus.len() != width
-        || rr.len() != width
-        || modulus[0] & 0x80 == 0
-    {
-        return false;
-    }
+    width != 0
+        && width <= RSA_MAX_KEY_BYTES
+        && modulus.len() == width
+        && rr_len == width
+        && modulus[0] & 0x80 != 0
+}
+
+/// `2^(2 * bits) mod modulus`, by modular doubling, with one byte of headroom.
+///
+/// The caller checks [`rr_geometry_ok`] first.
+fn pow2_mod(modulus: &[u8], bits: u32) -> [u8; WIDE] {
+    let width = modulus.len();
     let mut wide_modulus = [0u8; WIDE];
     wide_modulus[1..=width].copy_from_slice(modulus);
     let mut value = [0u8; WIDE];
@@ -153,6 +153,45 @@ pub fn rr_is_consistent(modulus: &[u8], bits: u32, rr: &[u8]) -> bool {
             }
         }
     }
+    value
+}
+
+/// Write `rr = 2^(2 * bits) mod modulus` into `rr`, in full width.
+///
+/// Returns `false` for a modulus that is not exactly `bits / 8` bytes, for a
+/// modulus without its top bit set, or for an `rr` of the wrong length.
+///
+/// # Examples
+///
+/// ```
+/// use avb_format::{rr, rr_is_consistent};
+///
+/// let modulus = [0x80, 0x00, 0x00, 0x03];
+/// let mut precomputation = [0u8; 4];
+/// assert!(rr(&modulus, 32, &mut precomputation));
+/// assert!(rr_is_consistent(&modulus, 32, &precomputation));
+/// ```
+pub fn rr(modulus: &[u8], bits: u32, rr: &mut [u8]) -> bool {
+    if !rr_geometry_ok(modulus, bits, rr.len()) {
+        return false;
+    }
+    let width = modulus.len();
+    let value = pow2_mod(modulus, bits);
+    rr.copy_from_slice(&value[1..=width]);
+    true
+}
+
+/// Whether `rr == 2^(2*bits) mod modulus`.
+///
+/// The exponent is computed by modular doubling in fixed buffers, so this
+/// function needs no allocation and no big-integer dependency. It returns
+/// `false` for a modulus that is not exactly `bits / 8` bytes and full width.
+pub fn rr_is_consistent(modulus: &[u8], bits: u32, rr: &[u8]) -> bool {
+    if !rr_geometry_ok(modulus, bits, rr.len()) {
+        return false;
+    }
+    let width = modulus.len();
+    let value = pow2_mod(modulus, bits);
     trim(&value[1..=width]) == trim(rr)
 }
 
