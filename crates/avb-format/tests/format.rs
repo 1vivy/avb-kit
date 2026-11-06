@@ -1,8 +1,8 @@
 use avb_format::Footer;
 use avb_format::{
-    ChainPartition, Defect, Descriptor, Error, ExtractError, Property, VbmetaInfo, descriptors,
-    exact_metadata, inspect, parse_footer, replacement_footer, validate_vbmeta, vbmd_extent,
-    vbmeta_entry,
+    CHAIN_PARTITION_FLAG_DO_NOT_USE_AB, ChainPartition, Defect, Descriptor, Error, ExtractError,
+    Property, VbmetaInfo, descriptors, exact_metadata, inspect, parse_footer, replacement_footer,
+    validate_vbmeta, vbmd_extent, vbmeta_entry,
 };
 
 fn metadata() -> Vec<u8> {
@@ -56,11 +56,12 @@ fn descriptor(tag: u64, body: &[u8]) -> Vec<u8> {
     out
 }
 
-fn chain_descriptor(rollback: u32, name: &str, key: &[u8]) -> Vec<u8> {
+fn chain_descriptor(rollback: u32, flags: u32, name: &str, key: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&rollback.to_be_bytes());
     body.extend_from_slice(&(name.len() as u32).to_be_bytes());
     body.extend_from_slice(&(key.len() as u32).to_be_bytes());
+    body.extend_from_slice(&flags.to_be_bytes());
     body.resize(76, 0);
     body.extend_from_slice(name.as_bytes());
     body.extend_from_slice(key);
@@ -149,7 +150,7 @@ fn inspect_parses_typed_descriptors_and_borrows_the_key() {
         &key,
         &[
             property("com.android.build.boot.security_patch", "2026-01-05"),
-            chain_descriptor(7, "boot", &key),
+            chain_descriptor(7, CHAIN_PARTITION_FLAG_DO_NOT_USE_AB, "boot", &key),
             hash_descriptor("system", b"salt", &[0xab; 32]),
             hashtree_descriptor("vendor", b"pepper", &[0xcd; 32]),
             kernel_cmdline("androidboot.verifiedbootstate=green"),
@@ -178,6 +179,7 @@ fn inspect_parses_typed_descriptors_and_borrows_the_key() {
     assert_eq!(value, "2026-01-05");
     let Descriptor::ChainPartition(ChainPartition {
         rollback_index_location,
+        flags,
         name,
         public_key,
     }) = found[1]
@@ -185,6 +187,7 @@ fn inspect_parses_typed_descriptors_and_borrows_the_key() {
         panic!("second descriptor is a chain partition");
     };
     assert_eq!(rollback_index_location, 7);
+    assert_eq!(flags, CHAIN_PARTITION_FLAG_DO_NOT_USE_AB);
     assert_eq!(name, "boot");
     assert_eq!(public_key, key.as_slice());
     assert!(matches!(

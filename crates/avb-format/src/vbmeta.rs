@@ -45,6 +45,11 @@ pub const DESCRIPTOR_TAG_KERNEL_CMDLINE: u64 = 3;
 /// Descriptor tag: chained partition.
 pub const DESCRIPTOR_TAG_CHAIN_PARTITION: u64 = 4;
 
+/// `AVB_CHAIN_PARTITION_DESCRIPTOR_FLAGS_DO_NOT_USE_AB`: libavb applies no slot
+/// suffix to this chained partition
+/// (`avb_chain_partition_descriptor.h`). It is a negative flag.
+pub const CHAIN_PARTITION_FLAG_DO_NOT_USE_AB: u32 = 1 << 0;
+
 /// `AVB_VBMETA_IMAGE_FLAGS_HASHTREE_DISABLED`: dm-verity is off
 /// (`avb_vbmeta_image.h:59-62`).
 pub const VBMETA_FLAG_HASHTREE_DISABLED: u32 = 1 << 0;
@@ -246,6 +251,8 @@ pub struct KernelCmdline<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChainPartition<'a> {
     pub rollback_index_location: u32,
+    /// `AVB_CHAIN_PARTITION_DESCRIPTOR_FLAGS_*` bits.
+    pub flags: u32,
     pub name: &'a str,
     pub public_key: &'a [u8],
 }
@@ -411,6 +418,7 @@ fn parse_chain(body: &[u8]) -> Result<ChainPartition<'_>, Defect> {
     let key_end = name_end.checked_add(key_len).ok_or(Defect::Overflow)?;
     Ok(ChainPartition {
         rollback_index_location,
+        flags: be_u32(body, 12).ok_or(Defect::ChainPartition)?,
         name: text(
             body.get(CHAIN_PREFIX..name_end)
                 .ok_or(Defect::ChainPartition)?,

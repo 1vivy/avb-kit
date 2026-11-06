@@ -35,9 +35,10 @@ pub use key::{
 };
 pub use report::{AvbDigest, Color, VerificationReport};
 pub use vbmeta::{
-    ChainPartition, DESCRIPTOR_TAG_CHAIN_PARTITION, DESCRIPTOR_TAG_HASH, DESCRIPTOR_TAG_HASHTREE,
-    DESCRIPTOR_TAG_KERNEL_CMDLINE, DESCRIPTOR_TAG_PROPERTY, Defect, Descriptor, DescriptorIter,
-    Descriptors, HEADER_SIZE, Hash, Hashtree, Header, KernelCmdline, MAX_VBMETA_IMAGES, Property,
-    VBMETA_FLAG_HASHTREE_DISABLED, VBMETA_FLAG_VERIFICATION_DISABLED, VBMETA_MAX_SIZE, VbmetaInfo,
-    descriptor, descriptors, exact_metadata, header, inspect, vbmeta_entry,
+    CHAIN_PARTITION_FLAG_DO_NOT_USE_AB, ChainPartition, DESCRIPTOR_TAG_CHAIN_PARTITION,
+    DESCRIPTOR_TAG_HASH, DESCRIPTOR_TAG_HASHTREE, DESCRIPTOR_TAG_KERNEL_CMDLINE,
+    DESCRIPTOR_TAG_PROPERTY, Defect, Descriptor, DescriptorIter, Descriptors, HEADER_SIZE, Hash,
+    Hashtree, Header, KernelCmdline, MAX_VBMETA_IMAGES, Property, VBMETA_FLAG_HASHTREE_DISABLED,
+    VBMETA_FLAG_VERIFICATION_DISABLED, VBMETA_MAX_SIZE, VbmetaInfo, descriptor, descriptors,
+    exact_metadata, header, inspect, vbmeta_entry,
 };

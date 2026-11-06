@@ -115,7 +115,9 @@ descriptors. It skips unknown tags without failing.
 | 0 | 4 | `rollback_index_location` |
 | 4 | 4 | `partition_name_len` |
 | 8 | 4 | `public_key_len` |
-| 12 | `partition_name_len` | Partition name, UTF-8 |
+| 12 | 4 | `flags`, bit 0 is `DO_NOT_USE_AB` |
+| 16 | 60 | Reserved, must be zero |
+| 76 | `partition_name_len` | Partition name, UTF-8 |
 | ... | `public_key_len` | AVB public key blob |
 
 The partition name has no `_a`/`_b` suffix. The key blob uses the layout in the
